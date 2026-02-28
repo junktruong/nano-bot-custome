@@ -231,6 +231,8 @@ def _make_provider(config: Config):
             user_data_dir=web_cfg.user_data_dir,
             headless=web_cfg.headless,
             timeout_seconds=web_cfg.timeout_seconds,
+            browser_channel=web_cfg.browser_channel,
+            executable_path=web_cfg.executable_path,
         )
 
     from nanobot.providers.registry import find_by_name

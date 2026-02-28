@@ -37,6 +37,8 @@ class ChatGPTWebProvider(LLMProvider):
         user_data_dir: str = "~/.nanobot/playwright/chatgpt",
         headless: bool = False,
         timeout_seconds: int = 180,
+        browser_channel: str = "chrome",
+        executable_path: str | None = None,
     ):
         super().__init__(api_key=None, api_base=None)
         self.default_model = default_model
@@ -44,6 +46,8 @@ class ChatGPTWebProvider(LLMProvider):
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.timeout_seconds = timeout_seconds
+        self.browser_channel = browser_channel
+        self.executable_path = executable_path
 
         self._playwright: Any | None = None
         self._context: Any | None = None
@@ -92,11 +96,22 @@ class ChatGPTWebProvider(LLMProvider):
 
         Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=self.user_data_dir,
-            headless=self.headless,
-            viewport={"width": 1440, "height": 960},
-        )
+        launch_opts: dict[str, Any] = {
+            "user_data_dir": self.user_data_dir,
+            "headless": self.headless,
+            "viewport": {"width": 1440, "height": 960},
+            "ignore_default_args": ["--enable-automation"],
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        }
+        if self.browser_channel:
+            launch_opts["channel"] = self.browser_channel
+        if self.executable_path:
+            launch_opts["executable_path"] = self.executable_path
+        self._context = await self._playwright.chromium.launch_persistent_context(**launch_opts)
         return self._context
 
     async def _find_first_visible(self, page: Any, selectors: tuple[str, ...], timeout_ms: int) -> Any:

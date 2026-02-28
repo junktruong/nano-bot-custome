@@ -259,6 +259,8 @@ class ChatGPTWebProviderConfig(Base):
     user_data_dir: str = "~/.nanobot/playwright/chatgpt"
     headless: bool = False
     timeout_seconds: int = 180
+    browser_channel: str = "chrome"  # Prefer branded Chrome for login compatibility
+    executable_path: str | None = None
 
 
 class ProvidersConfig(Base):

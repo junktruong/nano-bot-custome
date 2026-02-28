@@ -659,7 +659,11 @@ def channels_status():
 
     # Zalo
     zalo = config.channels.zalo
-    zalo_config = "token set" if zalo.token else "[dim]not configured[/dim]"
+    if zalo.mode == "webhook":
+        target = zalo.webhook_url or f"{zalo.webhook_host}:{zalo.webhook_port}{zalo.webhook_path}"
+        zalo_config = f"webhook: {target}" if zalo.token else "[dim]not configured[/dim]"
+    else:
+        zalo_config = "polling (token set)" if zalo.token else "[dim]not configured[/dim]"
     table.add_row(
         "Zalo",
         "✓" if zalo.enabled else "✗",

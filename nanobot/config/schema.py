@@ -39,7 +39,13 @@ class ZaloConfig(Base):
     enabled: bool = False
     token: str = ""  # Bot token issued by Zalo OA platform
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
+    mode: Literal["polling", "webhook"] = "polling"
     poll_timeout_seconds: int = 15
+    webhook_url: str = ""  # Public HTTPS URL registered to Zalo, e.g. https://bot.example.com/zalo/webhook
+    webhook_secret_token: str = ""
+    webhook_host: str = "0.0.0.0"  # Local bind host for webhook listener
+    webhook_port: int = 18791  # Local bind port for webhook listener
+    webhook_path: str = "/zalo/webhook"
 
 
 class FeishuConfig(Base):

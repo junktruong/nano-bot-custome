@@ -409,9 +409,24 @@ class ZaloChannel(BaseChannel):
         )
 
     async def _call_bot(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        """Call SDK method and await only when it is coroutine-based."""
+        """Call SDK method safely inside an existing event loop.
+
+        Some `python-zalo-bot` methods are sync wrappers that internally call
+        `asyncio.run(...)` (for example `set_webhook`). That crashes under our
+        async runtime. Prefer the SDK's async counterparts when available.
+        """
         if not self._bot:
             raise RuntimeError("Zalo bot is not initialized")
+
+        # Prefer async variants exposed by the SDK internals.
+        for alt_name in (f"_{method}_async", f"{method}_async"):
+            alt = getattr(self._bot, alt_name, None)
+            if callable(alt):
+                result = alt(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
         fn = getattr(self._bot, method)
         result = fn(*args, **kwargs)
         if inspect.isawaitable(result):

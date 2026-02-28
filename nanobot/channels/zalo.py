@@ -165,24 +165,52 @@ class ZaloChannel(BaseChannel):
                     getattr(me, "account_name", "?"),
                     getattr(me, "id", "?"),
                 )
-
-                await self._call_bot(
-                    "set_webhook",
-                    url=self.config.webhook_url,
-                    secret_token=self.config.webhook_secret_token,
-                )
-                logger.info("Zalo webhook registered: {}", self.config.webhook_url)
             except Exception as e:
-                logger.error("Failed to initialize Zalo webhook: {}", e)
+                # get_me is useful for diagnostics but should not block webhook startup.
+                logger.warning("Zalo get_me failed (continuing): {}", e)
+
+            registered = False
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    await self._call_bot(
+                        "set_webhook",
+                        url=self.config.webhook_url,
+                        secret_token=self.config.webhook_secret_token,
+                    )
+                    registered = True
+                    logger.info("Zalo webhook registered: {}", self.config.webhook_url)
+                    break
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "set_webhook attempt {}/3 failed: {}",
+                        attempt,
+                        e,
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(1.0 * attempt)
+
+            if not registered:
+                logger.error("Failed to initialize Zalo webhook after retries: {}", last_error)
                 return
 
-            self._loop = asyncio.get_running_loop()
-            self._webhook_queue = asyncio.Queue()
-            self._start_webhook_server()
-            self._webhook_consumer_task = asyncio.create_task(self._consume_webhook_queue())
+            try:
+                self._loop = asyncio.get_running_loop()
+                self._webhook_queue = asyncio.Queue()
+                self._start_webhook_server()
+                self._webhook_consumer_task = asyncio.create_task(self._consume_webhook_queue())
 
-            while self._running:
-                await asyncio.sleep(1)
+                while self._running:
+                    await asyncio.sleep(1)
+            finally:
+                if self._webhook_consumer_task:
+                    self._webhook_consumer_task.cancel()
+                    self._webhook_consumer_task = None
+                if self._webhook_server:
+                    self._webhook_server.shutdown()
+                    self._webhook_server.server_close()
+                    self._webhook_server = None
 
     def _start_webhook_server(self) -> None:
         channel = self

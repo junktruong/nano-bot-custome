@@ -221,10 +221,33 @@ class ZaloChannel(BaseChannel):
             def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
                 return
 
+            @staticmethod
+            def _norm_path(p: str) -> str:
+                if not p:
+                    return "/"
+                p = p.rstrip("/")
+                return p or "/"
+
+            def do_GET(self) -> None:  # noqa: N802
+                parsed = urlsplit(self.path)
+                path = self._norm_path(parsed.path)
+                expected = self._norm_path(expected_path)
+                if path != expected:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"not found")
+                    return
+                logger.debug("Zalo webhook GET probe: path={}", parsed.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlsplit(self.path)
-                path = parsed.path
-                if path != expected_path:
+                path = self._norm_path(parsed.path)
+                expected = self._norm_path(expected_path)
+                if path != expected:
+                    logger.warning("Zalo webhook path mismatch: got={}, expected={}", parsed.path, expected_path)
                     self.send_response(404)
                     self.end_headers()
                     self.wfile.write(b"not found")
@@ -244,6 +267,7 @@ class ZaloChannel(BaseChannel):
                         or ""
                     )
                 if expected_secret and provided != expected_secret:
+                    logger.warning("Zalo webhook secret mismatch for path={}", parsed.path)
                     self.send_response(403)
                     self.end_headers()
                     self.wfile.write(b"forbidden")
@@ -254,6 +278,7 @@ class ZaloChannel(BaseChannel):
                     raw = self.rfile.read(length) if length > 0 else b"{}"
                     payload = json.loads(raw.decode("utf-8"))
                 except Exception:
+                    logger.warning("Zalo webhook bad JSON payload")
                     self.send_response(400)
                     self.end_headers()
                     self.wfile.write(b"bad request")
@@ -261,6 +286,7 @@ class ZaloChannel(BaseChannel):
 
                 if channel._loop and channel._webhook_queue:
                     channel._loop.call_soon_threadsafe(channel._webhook_queue.put_nowait, payload)
+                    logger.debug("Zalo webhook accepted and queued (path={})", parsed.path)
 
                 self.send_response(200)
                 self.end_headers()

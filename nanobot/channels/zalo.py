@@ -61,14 +61,31 @@ class ZaloChannel(BaseChannel):
             logger.error("Zalo bot token not configured")
             return
 
+        mode = self.config.mode or "polling"
+        if mode == "webhook":
+            if not self.config.webhook_url:
+                logger.error("Zalo webhook mode requires channels.zalo.webhookUrl")
+                return
+            if not self.config.webhook_secret_token:
+                logger.error("Zalo webhook mode requires channels.zalo.webhookSecretToken")
+                return
+
         self._bot = self._zalo_bot_mod.Bot(self.config.token)
         self._running = True
 
-        mode = self.config.mode or "polling"
-        if mode == "webhook":
-            await self._run_webhook()
-        else:
-            await self._run_polling()
+        # Keep channel alive across transient timeout/network errors.
+        while self._running:
+            try:
+                if mode == "webhook":
+                    await self._run_webhook()
+                else:
+                    await self._run_polling()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("Zalo channel loop crashed (mode={}): {}", mode, e)
+            if self._running:
+                await asyncio.sleep(2.0)
 
     async def stop(self) -> None:
         self._running = False
@@ -147,13 +164,6 @@ class ZaloChannel(BaseChannel):
                     await asyncio.sleep(1)
 
     async def _run_webhook(self) -> None:
-        if not self.config.webhook_url:
-            logger.error("Zalo webhook mode requires channels.zalo.webhookUrl")
-            return
-        if not self.config.webhook_secret_token:
-            logger.error("Zalo webhook mode requires channels.zalo.webhookSecretToken")
-            return
-
         logger.info(
             "Starting Zalo bot (webhook mode): {} -> {}:{}{}",
             self.config.webhook_url,
@@ -164,7 +174,7 @@ class ZaloChannel(BaseChannel):
 
         async with self._bot:
             try:
-                me = await self._call_bot("get_me")
+                me = await self._call_bot_with_retry("get_me", attempts=3)
                 logger.info(
                     "Zalo bot connected: {} ({})",
                     getattr(me, "account_name", "?"),
@@ -176,10 +186,11 @@ class ZaloChannel(BaseChannel):
 
             registered = False
             last_error: Exception | None = None
-            for attempt in range(1, 4):
+            for attempt in range(1, 6):
                 try:
-                    await self._call_bot(
+                    await self._call_bot_with_retry(
                         "set_webhook",
+                        attempts=2,
                         url=self.config.webhook_url,
                         secret_token=self.config.webhook_secret_token,
                     )
@@ -189,15 +200,17 @@ class ZaloChannel(BaseChannel):
                 except Exception as e:
                     last_error = e
                     logger.warning(
-                        "set_webhook attempt {}/3 failed: {}",
+                        "set_webhook attempt {}/5 failed: {}",
                         attempt,
                         e,
                     )
-                    if attempt < 3:
+                    if attempt < 5:
                         await asyncio.sleep(1.0 * attempt)
 
             if not registered:
                 logger.error("Failed to initialize Zalo webhook after retries: {}", last_error)
+                # Keep listener alive and retry full startup loop instead of crashing channel task.
+                await asyncio.sleep(5.0)
                 return
 
             try:
@@ -707,3 +720,25 @@ class ZaloChannel(BaseChannel):
         if inspect.isawaitable(result):
             return await result
         return result
+
+    async def _call_bot_with_retry(
+        self,
+        method: str,
+        *args: Any,
+        attempts: int = 3,
+        **kwargs: Any,
+    ) -> Any:
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                return await self._call_bot(method, *args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt >= attempts:
+                    break
+                logger.warning("Zalo API {} attempt {}/{} failed: {}", method, attempt, attempts, e)
+                await asyncio.sleep(0.8 * attempt)
+        assert last_error is not None
+        raise last_error

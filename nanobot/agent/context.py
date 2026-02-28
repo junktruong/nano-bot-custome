@@ -125,9 +125,17 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             return text
         
         images = []
-        for path in media:
-            p = Path(path)
-            mime, _ = mimetypes.guess_type(path)
+        for item in media:
+            value = str(item).strip()
+            if not value:
+                continue
+
+            if value.startswith("http://") or value.startswith("https://") or value.startswith("data:image/"):
+                images.append({"type": "image_url", "image_url": {"url": value}})
+                continue
+
+            p = Path(value)
+            mime, _ = mimetypes.guess_type(value)
             if not p.is_file() or not mime or not mime.startswith("image/"):
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()

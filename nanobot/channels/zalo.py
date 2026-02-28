@@ -328,6 +328,7 @@ class ZaloChannel(BaseChannel):
 
     async def _on_webhook_payload(self, payload: dict[str, Any]) -> None:
         raw = payload.get("result", payload)
+        raw_media_paths = await self._extract_media_paths(payload)
 
         update_obj = None
         try:
@@ -338,23 +339,49 @@ class ZaloChannel(BaseChannel):
             update_obj = None
 
         if update_obj:
-            await self._on_update(update_obj)
+            await self._on_update(update_obj, extra_media_paths=raw_media_paths, raw_fallback=raw)
             return
 
         # Fallback parser when SDK cannot deserialize payload format.
         if not isinstance(raw, dict):
+            logger.debug("Zalo payload ignored (non-dict raw): {}", type(raw).__name__)
             return
-        msg = raw.get("message", {})
-        text = (msg.get("text") or raw.get("text") or "").strip()
-        media_paths = await self._extract_media_paths(raw)
+        msg = self._coerce_dict(raw.get("message"))
+        text = (
+            msg.get("text")
+            or msg.get("caption")
+            or raw.get("text")
+            or raw.get("content")
+            or ""
+        ).strip()
+        media_paths = raw_media_paths
         if not text and not media_paths:
+            logger.debug(
+                "Zalo payload has no text/media keys: event={} top_keys={} message_keys={}",
+                raw.get("event_name") or payload.get("event_name"),
+                list(raw.keys())[:20],
+                list(msg.keys())[:20],
+            )
             return
-        chat_id = str((msg.get("chat", {}) or {}).get("id") or msg.get("chat_id") or raw.get("chat_id") or "")
-        sender = msg.get("from_user") or msg.get("sender") or raw.get("sender") or {}
+        chat_obj = self._coerce_dict(msg.get("chat"))
+        sender_obj = self._coerce_dict(msg.get("from_user")) or self._coerce_dict(msg.get("sender"))
+        chat_id = str(
+            chat_obj.get("id")
+            or msg.get("chat_id")
+            or raw.get("chat_id")
+            or sender_obj.get("id")
+            or ""
+        )
+        sender = (
+            self._coerce_dict(msg.get("from_user"))
+            or self._coerce_dict(msg.get("sender"))
+            or self._coerce_dict(raw.get("sender"))
+        )
         sender_id = str(sender.get("id") or chat_id)
         username = sender.get("username")
         sender_full = f"{sender_id}|{username}" if username else sender_id
         if not chat_id:
+            logger.debug("Zalo fallback payload missing chat_id: top_keys={}", list(raw.keys())[:20])
             return
         await self._on_text(
             chat_id=chat_id,
@@ -365,7 +392,12 @@ class ZaloChannel(BaseChannel):
             media_paths=media_paths,
         )
 
-    async def _on_update(self, update: Any) -> None:
+    async def _on_update(
+        self,
+        update: Any,
+        extra_media_paths: list[str] | None = None,
+        raw_fallback: Any | None = None,
+    ) -> None:
         """Handle inbound update from Zalo SDK model."""
         message = getattr(update, "message", None)
         if not message:
@@ -373,7 +405,17 @@ class ZaloChannel(BaseChannel):
 
         text = (getattr(message, "text", None) or "").strip()
         media_paths = await self._extract_media_paths(message)
+        if extra_media_paths:
+            media_paths = list(dict.fromkeys([*media_paths, *extra_media_paths]))
+        if not text and raw_fallback and isinstance(raw_fallback, dict):
+            msg = raw_fallback.get("message", {})
+            text = (
+                (msg.get("caption") or msg.get("title") or msg.get("description") or "").strip()
+                if isinstance(msg, dict)
+                else ""
+            )
         if not text and not media_paths:
+            logger.debug("Zalo SDK update has no text/media")
             return
 
         chat_obj = getattr(message, "chat", None)
@@ -437,6 +479,12 @@ class ZaloChannel(BaseChannel):
         if message_id:
             metadata["message_id"] = message_id
 
+        logger.info(
+            "Zalo inbound message: chat_id={} text_len={} media_count={}",
+            chat_id,
+            len(text or ""),
+            len(media_paths or []),
+        )
         await self._handle_message(
             sender_id=sender_id,
             chat_id=chat_id,
@@ -450,7 +498,13 @@ class ZaloChannel(BaseChannel):
         urls = self._find_media_urls(data)
         if not urls:
             return []
-        return await self._download_image_urls(urls)
+        http_urls = [u for u in urls if u.startswith("http://") or u.startswith("https://")]
+        downloaded: list[str] = []
+        if http_urls:
+            downloaded = await self._download_image_urls(http_urls)
+        # Keep original URLs as fallback if local download fails (or for providers
+        # that can consume remote images directly).
+        return list(dict.fromkeys([*downloaded, *urls]))
 
     def _to_plain(self, obj: Any, depth: int = 0) -> Any:
         if depth > 6:
@@ -467,6 +521,16 @@ class ZaloChannel(BaseChannel):
                 return self._to_plain(obj.model_dump(), depth + 1)
             except Exception:
                 pass
+        if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+            try:
+                return self._to_plain(obj.dict(), depth + 1)
+            except Exception:
+                pass
+        if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+            try:
+                return self._to_plain(obj.to_dict(), depth + 1)
+            except Exception:
+                pass
 
         if hasattr(obj, "__dict__"):
             out: dict[str, Any] = {}
@@ -477,7 +541,34 @@ class ZaloChannel(BaseChannel):
                     continue
                 out[k] = self._to_plain(v, depth + 1)
             return out
+        if hasattr(obj, "__slots__"):
+            out: dict[str, Any] = {}
+            for k in getattr(obj, "__slots__", []) or []:
+                if k.startswith("_"):
+                    continue
+                try:
+                    v = getattr(obj, k)
+                except Exception:
+                    continue
+                out[k] = self._to_plain(v, depth + 1)
+            if out:
+                return out
         return None
+
+    @staticmethod
+    def _coerce_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            s = value.strip()
+            if s and s[0] in "{[" and s[-1] in "}]":
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    return {}
+        return {}
 
     def _find_media_urls(self, data: Any) -> list[str]:
         urls: set[str] = set()
@@ -501,10 +592,32 @@ class ZaloChannel(BaseChannel):
 
             if isinstance(node, str):
                 s = node.strip()
+                if s.startswith("data:image/"):
+                    urls.add(s)
+                    return
                 if not (s.startswith("http://") or s.startswith("https://")):
+                    if s and s[0] in "{[" and s[-1] in "}]":
+                        try:
+                            parsed = json.loads(s)
+                            _walk(parsed, key_hint)
+                        except Exception:
+                            pass
                     return
                 if self._looks_like_image_url(s) or any(
-                    t in key_hint for t in ("image", "photo", "thumb", "media", "attachment", "url")
+                    t in key_hint
+                    for t in (
+                        "image",
+                        "photo",
+                        "thumb",
+                        "media",
+                        "attachment",
+                        "url",
+                        "src",
+                        "source",
+                        "link",
+                        "cover",
+                        "file",
+                    )
                 ):
                     urls.add(s)
 
@@ -516,6 +629,24 @@ class ZaloChannel(BaseChannel):
         u = url.lower()
         return any(u.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"))
 
+    @staticmethod
+    def _looks_like_image_bytes(raw: bytes) -> bool:
+        if not raw:
+            return False
+        signatures = (
+            b"\xff\xd8\xff",  # JPEG
+            b"\x89PNG\r\n\x1a\n",  # PNG
+            b"GIF87a",
+            b"GIF89a",
+            b"RIFF",  # WebP in RIFF container (further checked below)
+            b"BM",  # BMP
+        )
+        if any(raw.startswith(sig) for sig in signatures):
+            if raw.startswith(b"RIFF"):
+                return b"WEBP" in raw[:16]
+            return True
+        return False
+
     async def _download_image_urls(self, urls: list[str]) -> list[str]:
         self._media_dir.mkdir(parents=True, exist_ok=True)
         saved: list[str] = []
@@ -523,16 +654,32 @@ class ZaloChannel(BaseChannel):
         async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
             for i, url in enumerate(urls):
                 try:
-                    r = await client.get(url)
+                    r = await client.get(
+                        url,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (X11; Linux x86_64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/121.0.0.0 Safari/537.36"
+                            )
+                        },
+                    )
                     r.raise_for_status()
                     ctype = r.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                    if not ctype.startswith("image/"):
+                    looks_image = (
+                        ctype.startswith("image/")
+                        or self._looks_like_image_url(url)
+                        or self._looks_like_image_bytes(r.content)
+                    )
+                    if not looks_image:
+                        logger.debug("Skip non-image media URL: {} (content-type={})", url, ctype or "n/a")
                         continue
-                    ext = mimetypes.guess_extension(ctype) or ".jpg"
+                    ext = mimetypes.guess_extension(ctype) or Path(urlsplit(url).path).suffix or ".jpg"
                     path = self._media_dir / f"{uuid.uuid4().hex}_{i}{ext}"
                     path.write_bytes(r.content)
                     saved.append(str(path))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Failed to download media URL {}: {}", url, e)
                     continue
         return saved
 

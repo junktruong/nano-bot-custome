@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import mimetypes
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
@@ -50,6 +54,7 @@ class ZaloChannel(BaseChannel):
         self._webhook_consumer_task: asyncio.Task | None = None
         self._webhook_server: ThreadingHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
+        self._media_dir = Path.home() / ".nanobot" / "media" / "zalo"
 
     async def start(self) -> None:
         if not self.config.token:
@@ -341,7 +346,8 @@ class ZaloChannel(BaseChannel):
             return
         msg = raw.get("message", {})
         text = (msg.get("text") or raw.get("text") or "").strip()
-        if not text:
+        media_paths = await self._extract_media_paths(raw)
+        if not text and not media_paths:
             return
         chat_id = str((msg.get("chat", {}) or {}).get("id") or msg.get("chat_id") or raw.get("chat_id") or "")
         sender = msg.get("from_user") or msg.get("sender") or raw.get("sender") or {}
@@ -356,6 +362,7 @@ class ZaloChannel(BaseChannel):
             text=text,
             display_name=sender.get("display_name", "bạn"),
             message_id=str(msg.get("message_id") or raw.get("message_id") or ""),
+            media_paths=media_paths,
         )
 
     async def _on_update(self, update: Any) -> None:
@@ -365,7 +372,8 @@ class ZaloChannel(BaseChannel):
             return
 
         text = (getattr(message, "text", None) or "").strip()
-        if not text:
+        media_paths = await self._extract_media_paths(message)
+        if not text and not media_paths:
             return
 
         chat_obj = getattr(message, "chat", None)
@@ -391,6 +399,7 @@ class ZaloChannel(BaseChannel):
             text=text,
             display_name=getattr(user_obj, "display_name", "bạn"),
             message_id=str(getattr(message, "message_id", "") or ""),
+            media_paths=media_paths,
         )
 
     async def _on_text(
@@ -400,8 +409,9 @@ class ZaloChannel(BaseChannel):
         text: str,
         display_name: str,
         message_id: str,
+        media_paths: list[str] | None = None,
     ) -> None:
-        lower = text.lower()
+        lower = text.lower() if text else ""
         if lower == "/start":
             await self._call_bot(
                 "send_message",
@@ -430,9 +440,101 @@ class ZaloChannel(BaseChannel):
         await self._handle_message(
             sender_id=sender_id,
             chat_id=chat_id,
-            content=text,
+            content=text or "[image]",
+            media=media_paths or [],
             metadata=metadata,
         )
+
+    async def _extract_media_paths(self, source: Any) -> list[str]:
+        data = self._to_plain(source)
+        urls = self._find_media_urls(data)
+        if not urls:
+            return []
+        return await self._download_image_urls(urls)
+
+    def _to_plain(self, obj: Any, depth: int = 0) -> Any:
+        if depth > 6:
+            return None
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, dict):
+            return {str(k): self._to_plain(v, depth + 1) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [self._to_plain(v, depth + 1) for v in obj]
+
+        if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+            try:
+                return self._to_plain(obj.model_dump(), depth + 1)
+            except Exception:
+                pass
+
+        if hasattr(obj, "__dict__"):
+            out: dict[str, Any] = {}
+            for k, v in vars(obj).items():
+                if k.startswith("_"):
+                    continue
+                if k.lower() in {"bot", "context", "application", "dispatcher"}:
+                    continue
+                out[k] = self._to_plain(v, depth + 1)
+            return out
+        return None
+
+    def _find_media_urls(self, data: Any) -> list[str]:
+        urls: set[str] = set()
+        seen: set[int] = set()
+
+        def _walk(node: Any, key_hint: str = "") -> None:
+            oid = id(node)
+            if oid in seen:
+                return
+            seen.add(oid)
+
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    _walk(v, str(k).lower())
+                return
+
+            if isinstance(node, list):
+                for v in node:
+                    _walk(v, key_hint)
+                return
+
+            if isinstance(node, str):
+                s = node.strip()
+                if not (s.startswith("http://") or s.startswith("https://")):
+                    return
+                if self._looks_like_image_url(s) or any(
+                    t in key_hint for t in ("image", "photo", "thumb", "media", "attachment", "url")
+                ):
+                    urls.add(s)
+
+        _walk(data)
+        return list(urls)
+
+    @staticmethod
+    def _looks_like_image_url(url: str) -> bool:
+        u = url.lower()
+        return any(u.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"))
+
+    async def _download_image_urls(self, urls: list[str]) -> list[str]:
+        self._media_dir.mkdir(parents=True, exist_ok=True)
+        saved: list[str] = []
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+            for i, url in enumerate(urls):
+                try:
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    ctype = r.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    if not ctype.startswith("image/"):
+                        continue
+                    ext = mimetypes.guess_extension(ctype) or ".jpg"
+                    path = self._media_dir / f"{uuid.uuid4().hex}_{i}{ext}"
+                    path.write_bytes(r.content)
+                    saved.append(str(path))
+                except Exception:
+                    continue
+        return saved
 
     async def _call_bot(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Call SDK method safely inside an existing event loop.

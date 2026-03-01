@@ -230,7 +230,7 @@ class ChatGPTWebProvider(LLMProvider):
                 baseline_text = ""
 
         composer = await self._find_composer(page, session_key, max_wait_s=8.0)
-        await composer.click(timeout=1000)
+        await self._focus_composer_soft(composer)
         if image_paths:
             await self._attach_images(page, image_paths)
 
@@ -294,6 +294,7 @@ class ChatGPTWebProvider(LLMProvider):
 
             # Fallback to Enter if no send button surfaced yet.
             try:
+                await self._focus_composer_soft(composer)
                 await composer.press("Enter")
                 await asyncio.sleep(0.15)
                 # Even if stop button is not visible yet, Enter may have submitted.
@@ -316,7 +317,19 @@ class ChatGPTWebProvider(LLMProvider):
             except Exception:
                 continue
 
+        for selector in _FILE_INPUT_SELECTORS:
+            locator = page.locator(selector).first
+            try:
+                if await locator.count() > 0:
+                    await locator.set_input_files(image_paths, timeout=10000)
+                    await asyncio.sleep(0.3)
+                    return
+            except Exception:
+                continue
+
     async def _set_composer_text(self, page: Any, composer: Any, text: str) -> None:
+        await self._focus_composer_soft(composer)
+
         # Preferred path for textarea/input.
         try:
             await composer.fill(text)
@@ -361,15 +374,41 @@ class ChatGPTWebProvider(LLMProvider):
         # Last-resort keyboard typing if DOM write paths fail.
         await page.keyboard.type(text, delay=0)
 
-        for selector in _FILE_INPUT_SELECTORS:
-            locator = page.locator(selector).first
-            try:
-                if await locator.count() > 0:
-                    await locator.set_input_files(image_paths, timeout=10000)
-                    await asyncio.sleep(0.3)
-                    return
-            except Exception:
-                continue
+    async def _focus_composer_soft(self, composer: Any) -> None:
+        # Best-effort focus: never raise.
+        try:
+            await composer.scroll_into_view_if_needed(timeout=1000)
+        except Exception:
+            pass
+        try:
+            await composer.click(timeout=2500)
+            return
+        except Exception:
+            pass
+        try:
+            await composer.click(timeout=2500, force=True)
+            return
+        except Exception:
+            pass
+        try:
+            await composer.evaluate(
+                """(el) => {
+                    if (!el) return;
+                    if (typeof el.focus === "function") el.focus();
+                    if (el.isContentEditable) {
+                        const range = document.createRange();
+                        range.selectNodeContents(el);
+                        range.collapse(false);
+                        const sel = window.getSelection();
+                        if (sel) {
+                            sel.removeAllRanges();
+                            sel.addRange(range);
+                        }
+                    }
+                }"""
+            )
+        except Exception:
+            pass
 
     async def _is_generating(self, page: Any) -> bool:
         for selector in _STOP_BUTTON_SELECTORS:

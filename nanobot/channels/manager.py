@@ -226,6 +226,14 @@ class ChannelManager:
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:
+                        logger.debug(
+                            "Dispatch outbound -> {}:{} chars={} progress={} queue_left={}",
+                            msg.channel,
+                            msg.chat_id,
+                            len(msg.content or ""),
+                            bool(msg.metadata.get("_progress")),
+                            self.bus.outbound_size,
+                        )
                         await channel.send(msg)
                     except Exception as e:
                         logger.error("Error sending to {}: {}", msg.channel, e)

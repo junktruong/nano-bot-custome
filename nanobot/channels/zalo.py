@@ -133,10 +133,32 @@ class ZaloChannel(BaseChannel):
 
         content = (msg.content or "").strip()
         if content:
-            try:
-                await self._call_bot_with_retry("send_message", chat_id, content, attempts=4)
-            except Exception as e:
-                logger.error("Failed to send Zalo message: {}", e)
+            chunks = self._split_text(content, max_len=1200)
+            logger.debug(
+                "Zalo outbound: chat_id={} chars={} chunks={}",
+                chat_id,
+                len(content),
+                len(chunks),
+            )
+            for idx, chunk in enumerate(chunks, start=1):
+                try:
+                    await self._call_bot_with_retry("send_message", chat_id, chunk, attempts=4)
+                    logger.debug(
+                        "Zalo outbound sent: chat_id={} chunk={}/{} chars={}",
+                        chat_id,
+                        idx,
+                        len(chunks),
+                        len(chunk),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send Zalo message chunk {}/{} (chars={}): {}",
+                        idx,
+                        len(chunks),
+                        len(chunk),
+                        e,
+                    )
+                    break
 
     async def _run_polling(self) -> None:
         logger.info("Starting Zalo bot (polling mode)...")
@@ -743,3 +765,23 @@ class ZaloChannel(BaseChannel):
                 await asyncio.sleep(0.8 * attempt)
         assert last_error is not None
         raise last_error
+
+    @staticmethod
+    def _split_text(text: str, max_len: int = 1200) -> list[str]:
+        if len(text) <= max_len:
+            return [text]
+        parts: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_len:
+                parts.append(remaining)
+                break
+            cut = remaining[:max_len]
+            pos = cut.rfind("\n")
+            if pos < max_len * 0.5:
+                pos = cut.rfind(" ")
+            if pos < max_len * 0.5:
+                pos = max_len
+            parts.append(remaining[:pos].rstrip())
+            remaining = remaining[pos:].lstrip()
+        return [p for p in parts if p]

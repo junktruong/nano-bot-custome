@@ -61,7 +61,7 @@ class ChatGPTWebProvider(LLMProvider):
         chat_url: str = "https://chatgpt.com/",
         user_data_dir: str = "~/.nanobot/playwright/chatgpt",
         headless: bool = False,
-        timeout_seconds: int = 60,
+        timeout_seconds: int = 300,
         browser_channel: str = "chrome",
         executable_path: str | None = None,
     ):
@@ -240,7 +240,7 @@ class ChatGPTWebProvider(LLMProvider):
         if not sent:
             raise TimeoutError("Failed to trigger send in ChatGPT composer")
 
-        timeout_s = min(max(5, int(self.timeout_seconds)), 60)
+        timeout_s = min(max(5, int(self.timeout_seconds)), 300)
         deadline = time.monotonic() + timeout_s
         last_text = ""
         stable_ticks = 0
@@ -522,6 +522,8 @@ class ChatGPTWebProvider(LLMProvider):
         lines = [
             "Respond to the latest USER message.",
             "If no tool is needed, answer naturally.",
+            "Do not call the 'message' tool for normal replies to the current user.",
+            "Use 'message' tool only when explicitly asked to send to a different channel/chat.",
             "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
             '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',
             "Do not wrap with markdown code fences.",
@@ -597,7 +599,28 @@ class ChatGPTWebProvider(LLMProvider):
 
         clean = _TOOL_CALL_TAG_RE.sub("", text)
         clean = _TOOL_CALLS_TAG_RE.sub("", clean)
-        return calls, clean.strip()
+        content_from_message_tool = ""
+        filtered_calls: list[ToolCallRequest] = []
+        for call in calls:
+            if call.name != "message":
+                filtered_calls.append(call)
+                continue
+            args = call.arguments or {}
+            channel = str(args.get("channel", "") or "").strip()
+            chat_id = str(args.get("chat_id", "") or "").strip()
+            media = args.get("media") or []
+            msg_text = str(args.get("content", "") or "").strip()
+            # Treat simple same-chat message tool calls as normal assistant text.
+            if not channel and not chat_id and not media and msg_text:
+                if not content_from_message_tool:
+                    content_from_message_tool = msg_text
+                continue
+            filtered_calls.append(call)
+
+        clean_text = clean.strip()
+        if content_from_message_tool and not clean_text:
+            clean_text = content_from_message_tool
+        return filtered_calls, clean_text
 
     @staticmethod
     def _safe_json_loads(raw: str) -> Any | None:

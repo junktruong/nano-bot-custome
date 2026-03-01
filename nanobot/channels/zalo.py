@@ -111,21 +111,22 @@ class ZaloChannel(BaseChannel):
         chat_id = str(msg.chat_id)
         if msg.metadata.get("_progress"):
             try:
-                await self._call_bot("send_chat_action", chat_id, self._typing_action)
+                await self._call_bot_with_retry("send_chat_action", chat_id, self._typing_action, attempts=2)
             except Exception:
                 pass
 
         for media in msg.media or []:
             try:
                 if media.startswith("http://") or media.startswith("https://"):
-                    await self._call_bot("send_photo", chat_id, "", media)
+                    await self._call_bot_with_retry("send_photo", chat_id, "", media, attempts=3)
                 else:
                     filename = media.rsplit("/", 1)[-1]
-                    await self._call_bot(
+                    await self._call_bot_with_retry(
                         "send_message",
                         chat_id,
                         f"[Attachment skipped: {filename}] "
                         "Zalo channel currently supports media URLs only.",
+                        attempts=3,
                     )
             except Exception as e:
                 logger.error("Failed to send Zalo media {}: {}", media, e)
@@ -133,7 +134,7 @@ class ZaloChannel(BaseChannel):
         content = (msg.content or "").strip()
         if content:
             try:
-                await self._call_bot("send_message", chat_id, content)
+                await self._call_bot_with_retry("send_message", chat_id, content, attempts=4)
             except Exception as e:
                 logger.error("Failed to send Zalo message: {}", e)
 

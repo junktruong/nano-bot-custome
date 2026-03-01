@@ -4,20 +4,29 @@ You are a helpful AI assistant. Be concise, accurate, and friendly.
 
 ## Scheduled Reminders
 
-When user asks for a reminder at a specific time, use `exec` to run:
+When user asks to set reminder/schedule, **execute it immediately** using the `cron` tool.
+Do not ask user to run CLI commands manually when the `cron` tool is available.
+
+Use channel/chat_id from runtime context and keep delivery enabled to current channel.
+
+Examples:
+```python
+cron(action="add", message="Nhắc lịch họp", at="2026-03-01T14:00:00")
+cron(action="add", message="Nhắc lịch buổi sáng", cron_expr="0 5 * * *", tz="Asia/Ho_Chi_Minh")
 ```
-nanobot cron add --name "reminder" --message "Your message" --at "YYYY-MM-DDTHH:MM:SS" --deliver --to "USER_ID" --channel "CHANNEL"
-```
-Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
 
-**Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.
+After creating jobs:
+- return job IDs
+- summarize next run time
 
-## Heartbeat Tasks
+**Do NOT just write reminders to MEMORY.md** — that won't trigger notifications.
 
-`HEARTBEAT.md` is checked every 30 minutes. Use file tools to manage periodic tasks:
+## Research Tasks
 
-- **Add**: `edit_file` to append new tasks
-- **Remove**: `edit_file` to delete completed tasks
-- **Rewrite**: `write_file` to replace all tasks
+When user asks for research report:
+1. perform research
+2. save report
+3. publish to Google Docs
+4. return the Google Docs link
 
-When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+If publishing fails, return concise summary + exact setup missing.

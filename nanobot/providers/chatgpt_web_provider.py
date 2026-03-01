@@ -13,13 +13,18 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _COMPOSER_SELECTORS = (
+    'div#prompt-textarea[contenteditable="true"]',
+    'div[data-testid="composer-input"][contenteditable="true"]',
     'textarea[data-testid="composer-input"]',
     "#prompt-textarea",
     'textarea[placeholder*="Message"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"]',
     "textarea",
 )
 _SEND_BUTTON_SELECTORS = (
@@ -35,6 +40,7 @@ _FILE_INPUT_SELECTORS = (
     'input[type="file"]',
 )
 _ASSISTANT_SELECTOR = '[data-message-author-role="assistant"]'
+_USER_SELECTOR = '[data-message-author-role="user"]'
 _STOP_BUTTON_SELECTORS = (
     'button[aria-label*="Stop"]',
     'button:has-text("Stop generating")',
@@ -95,6 +101,13 @@ class ChatGPTWebProvider(LLMProvider):
                 session_key = self._extract_session_key(messages)
                 page = await self._ensure_page(session_key)
                 prompt, images, temp_files = await self._build_turn_input(messages, session_key, tools)
+                logger.debug(
+                    "ChatGPT Web submit: session={} prompt_len={} images={} tools={}",
+                    session_key,
+                    len(prompt or ""),
+                    len(images),
+                    len(tools or []),
+                )
                 response = await self._submit_and_wait(
                     page=page,
                     session_key=session_key,
@@ -102,6 +115,12 @@ class ChatGPTWebProvider(LLMProvider):
                     image_paths=images,
                 )
                 tool_calls, clean_content = self._extract_tool_calls(response, tools)
+                logger.debug(
+                    "ChatGPT Web response: session={} response_len={} tool_calls={}",
+                    session_key,
+                    len(response or ""),
+                    len(tool_calls),
+                )
                 self._turn_count[session_key] = self._turn_count.get(session_key, 0) + 1
                 if tool_calls:
                     return LLMResponse(
@@ -200,14 +219,22 @@ class ChatGPTWebProvider(LLMProvider):
         image_paths: list[str],
     ) -> str:
         assistant = page.locator(_ASSISTANT_SELECTOR)
+        user_msgs = page.locator(_USER_SELECTOR)
         previous_count = await assistant.count()
+        previous_user_count = await user_msgs.count()
+        baseline_text = ""
+        if previous_count > 0:
+            try:
+                baseline_text = (await assistant.nth(previous_count - 1).inner_text()).strip()
+            except Exception:
+                baseline_text = ""
 
         composer = await self._find_composer(page, session_key, max_wait_s=8.0)
         await composer.click(timeout=1000)
         if image_paths:
             await self._attach_images(page, image_paths)
 
-        await composer.fill(prompt or "Please analyze the attached image.")
+        await self._set_composer_text(page, composer, prompt or "Please analyze the attached image.")
 
         sent = await self._click_send(page, composer, max_wait_s=8.0)
         if not sent:
@@ -217,26 +244,40 @@ class ChatGPTWebProvider(LLMProvider):
         deadline = time.monotonic() + timeout_s
         last_text = ""
         stable_ticks = 0
+        submitted = False
 
         while time.monotonic() < deadline:
+            try:
+                if await user_msgs.count() > previous_user_count:
+                    submitted = True
+            except Exception:
+                pass
+
             count = await assistant.count()
             if count > 0:
                 idx = count - 1
                 current = (await assistant.nth(idx).inner_text()).strip()
                 if current:
+                    changed = (count > previous_count) or (current != baseline_text)
+                    if not changed:
+                        await asyncio.sleep(0.5)
+                        continue
+
                     if current == last_text:
                         stable_ticks += 1
                     else:
                         last_text = current
                         stable_ticks = 0
 
-                    if count > previous_count and stable_ticks >= 2 and not await self._is_generating(page):
+                    if stable_ticks >= 2 and not await self._is_generating(page):
                         return current
 
             await asyncio.sleep(0.5)
 
-        if last_text:
+        if last_text and last_text != baseline_text:
             return last_text
+        if not submitted:
+            raise TimeoutError(f"Message was not submitted to ChatGPT within {timeout_s}s")
         raise TimeoutError(f"Timed out waiting for ChatGPT response after {timeout_s}s")
 
     async def _click_send(self, page: Any, composer: Any, max_wait_s: float) -> bool:
@@ -254,9 +295,9 @@ class ChatGPTWebProvider(LLMProvider):
             # Fallback to Enter if no send button surfaced yet.
             try:
                 await composer.press("Enter")
-                await asyncio.sleep(0.2)
-                if await self._is_generating(page):
-                    return True
+                await asyncio.sleep(0.15)
+                # Even if stop button is not visible yet, Enter may have submitted.
+                return True
             except Exception:
                 pass
             await asyncio.sleep(0.2)
@@ -274,6 +315,51 @@ class ChatGPTWebProvider(LLMProvider):
                     break
             except Exception:
                 continue
+
+    async def _set_composer_text(self, page: Any, composer: Any, text: str) -> None:
+        # Preferred path for textarea/input.
+        try:
+            await composer.fill(text)
+            return
+        except Exception:
+            pass
+
+        # Fallback for contenteditable composers used by newer ChatGPT web UIs.
+        try:
+            await composer.click(timeout=1000)
+        except Exception:
+            pass
+
+        try:
+            await composer.evaluate(
+                """(el, value) => {
+                    const isInput = el.tagName === "TEXTAREA" || el.tagName === "INPUT";
+                    if (isInput) {
+                        el.value = value;
+                        el.dispatchEvent(new Event("input", { bubbles: true }));
+                        return;
+                    }
+                    if (el.isContentEditable) {
+                        el.innerHTML = "";
+                        const lines = String(value).split("\\n");
+                        for (let i = 0; i < lines.length; i++) {
+                            if (i > 0) el.appendChild(document.createElement("br"));
+                            el.appendChild(document.createTextNode(lines[i]));
+                        }
+                        el.dispatchEvent(new Event("input", { bubbles: true }));
+                        return;
+                    }
+                    el.textContent = value;
+                    el.dispatchEvent(new Event("input", { bubbles: true }));
+                }""",
+                text,
+            )
+            return
+        except Exception:
+            pass
+
+        # Last-resort keyboard typing if DOM write paths fail.
+        await page.keyboard.type(text, delay=0)
 
         for selector in _FILE_INPUT_SELECTORS:
             locator = page.locator(selector).first

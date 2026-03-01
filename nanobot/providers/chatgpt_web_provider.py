@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
 import re
 import time
@@ -13,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _COMPOSER_SELECTORS = (
     'textarea[data-testid="composer-input"]',
@@ -40,6 +41,9 @@ _STOP_BUTTON_SELECTORS = (
 )
 _RUNTIME_TAG = "[Runtime Context"
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.S)
+_TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*([\s\S]*?)\s*</tool_call>", re.I)
+_TOOL_CALLS_TAG_RE = re.compile(r"<tool_calls>\s*([\s\S]*?)\s*</tool_calls>", re.I)
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)
 
 
 class ChatGPTWebProvider(LLMProvider):
@@ -83,22 +87,29 @@ class ChatGPTWebProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ) -> LLMResponse:
-        del tools, model, max_tokens, temperature  # ChatGPT Web does not expose API tool-calls.
+        del model, max_tokens, temperature  # Not supported by ChatGPT web UI.
 
         temp_files: list[Path] = []
         async with self._lock:
             try:
                 session_key = self._extract_session_key(messages)
                 page = await self._ensure_page(session_key)
-                prompt, images, temp_files = await self._build_turn_input(messages, session_key)
+                prompt, images, temp_files = await self._build_turn_input(messages, session_key, tools)
                 response = await self._submit_and_wait(
                     page=page,
                     session_key=session_key,
                     prompt=prompt,
                     image_paths=images,
                 )
+                tool_calls, clean_content = self._extract_tool_calls(response, tools)
                 self._turn_count[session_key] = self._turn_count.get(session_key, 0) + 1
-                return LLMResponse(content=response, finish_reason="stop")
+                if tool_calls:
+                    return LLMResponse(
+                        content=clean_content or None,
+                        tool_calls=tool_calls,
+                        finish_reason="tool_calls",
+                    )
+                return LLMResponse(content=clean_content, finish_reason="stop")
             except Exception as e:
                 return LLMResponse(
                     content=f"Error calling ChatGPT Web: {e}",
@@ -288,14 +299,21 @@ class ChatGPTWebProvider(LLMProvider):
         self,
         messages: list[dict[str, Any]],
         session_key: str,
+        tools: list[dict[str, Any]] | None,
     ) -> tuple[str, list[str], list[Path]]:
         latest_text, latest_images, temp_files = await self._extract_latest_user_input(messages)
 
+        # During tool loop, include recent tool context so the model can continue.
+        if self._has_pending_tool_context(messages):
+            return self._messages_to_prompt(messages, tools=tools), [], temp_files
+
         # First turn of a browser session: bootstrap with full prompt once.
         if self._turn_count.get(session_key, 0) == 0:
-            bootstrap = self._messages_to_prompt(messages)
+            bootstrap = self._messages_to_prompt(messages, tools=tools)
             return bootstrap or latest_text, latest_images, temp_files
 
+        if tools:
+            latest_text = self._append_tool_hint(latest_text)
         return latest_text, latest_images, temp_files
 
     async def _extract_latest_user_input(
@@ -385,7 +403,7 @@ class ChatGPTWebProvider(LLMProvider):
             return ""
         return str(content)
 
-    def _messages_to_prompt(self, messages: list[dict[str, Any]]) -> str:
+    def _messages_to_prompt(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> str:
         # Bootstrap only: keep context bounded to reduce initial compose latency.
         sliced = self._sanitize_empty_content(messages)[-20:]
         parts: list[str] = []
@@ -395,11 +413,147 @@ class ChatGPTWebProvider(LLMProvider):
             if not text:
                 continue
             parts.append(f"{role}:\n{text}")
-        parts.append(
-            "INSTRUCTION:\nRespond to the latest USER message naturally. "
-            "Do not output any function-call JSON."
-        )
+        parts.append(f"INSTRUCTION:\n{self._build_tool_instruction(tools)}")
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _has_pending_tool_context(messages: list[dict[str, Any]]) -> bool:
+        for msg in reversed(messages):
+            role = str(msg.get("role", ""))
+            if role == "user":
+                return False
+            if role == "tool":
+                return True
+            if role == "assistant" and msg.get("tool_calls"):
+                return True
+        return False
+
+    @staticmethod
+    def _build_tool_instruction(tools: list[dict[str, Any]] | None) -> str:
+        if not tools:
+            return "Respond naturally to the latest USER message."
+
+        lines = [
+            "Respond to the latest USER message.",
+            "If no tool is needed, answer naturally.",
+            "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
+            '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',
+            "Do not wrap with markdown code fences.",
+            "Available tools:",
+        ]
+        for tool in tools[:20]:
+            fn = tool.get("function", {}) if isinstance(tool, dict) else {}
+            name = str(fn.get("name", "")).strip()
+            if not name:
+                continue
+            desc = str(fn.get("description", "")).strip().splitlines()[0][:120]
+            props = ((fn.get("parameters", {}) or {}).get("properties", {}) or {})
+            params = ", ".join(list(props.keys())[:8])
+            suffix = f" params: {params}" if params else ""
+            lines.append(f"- {name}: {desc}{suffix}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _append_tool_hint(text: str) -> str:
+        base = text.strip() if text else ""
+        hint = (
+            'If you need a tool, output only: '
+            '<tool_call>{"name":"tool_name","arguments":{...}}</tool_call>'
+        )
+        return f"{base}\n\n{hint}".strip()
+
+    def _extract_tool_calls(
+        self,
+        text: str,
+        tools: list[dict[str, Any]] | None,
+    ) -> tuple[list[ToolCallRequest], str]:
+        if not text:
+            return [], ""
+
+        allowed: set[str] = set()
+        for tool in tools or []:
+            fn = tool.get("function", {}) if isinstance(tool, dict) else {}
+            name = fn.get("name")
+            if isinstance(name, str) and name.strip():
+                allowed.add(name.strip())
+
+        payload_texts: list[str] = []
+        payload_texts.extend(m.group(1).strip() for m in _TOOL_CALL_TAG_RE.finditer(text))
+        payload_texts.extend(m.group(1).strip() for m in _TOOL_CALLS_TAG_RE.finditer(text))
+
+        stripped = text.strip()
+        if not payload_texts:
+            if stripped.startswith("{") or stripped.startswith("["):
+                payload_texts.append(stripped)
+            else:
+                for m in _JSON_FENCE_RE.finditer(text):
+                    candidate = m.group(1).strip()
+                    if candidate.startswith("{") or candidate.startswith("["):
+                        payload_texts.append(candidate)
+
+        calls: list[ToolCallRequest] = []
+        for payload_text in payload_texts:
+            parsed = self._safe_json_loads(payload_text)
+            if parsed is None:
+                continue
+            for name, args in self._normalize_tool_payload(parsed):
+                if allowed and name not in allowed:
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                calls.append(
+                    ToolCallRequest(
+                        id=str(uuid.uuid4())[:8],
+                        name=name,
+                        arguments=args,
+                    )
+                )
+
+        clean = _TOOL_CALL_TAG_RE.sub("", text)
+        clean = _TOOL_CALLS_TAG_RE.sub("", clean)
+        return calls, clean.strip()
+
+    @staticmethod
+    def _safe_json_loads(raw: str) -> Any | None:
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _normalize_tool_payload(self, parsed: Any) -> list[tuple[str, dict[str, Any]]]:
+        entries: list[Any] = []
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("tool_calls"), list):
+                entries.extend(parsed["tool_calls"])
+            elif "name" in parsed and "arguments" in parsed:
+                entries.append(parsed)
+            elif isinstance(parsed.get("function"), dict):
+                fn = parsed["function"]
+                entries.append({"name": fn.get("name"), "arguments": fn.get("arguments", {})})
+        elif isinstance(parsed, list):
+            entries.extend(parsed)
+
+        out: list[tuple[str, dict[str, Any]]] = []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("tool")
+            if not name and isinstance(item.get("function"), dict):
+                name = item["function"].get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            args: Any = item.get("arguments", item.get("args", {}))
+            if args is None and isinstance(item.get("function"), dict):
+                args = item["function"].get("arguments", {})
+            if isinstance(args, str):
+                parsed_args = self._safe_json_loads(args)
+                if parsed_args is None:
+                    continue
+                args = parsed_args
+            if not isinstance(args, dict):
+                continue
+            out.append((name.strip(), args))
+        return out
 
     @staticmethod
     def _extract_session_key(messages: list[dict[str, Any]]) -> str:

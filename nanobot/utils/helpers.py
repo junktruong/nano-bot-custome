@@ -59,9 +59,42 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
+    added.extend(sync_builtin_skills(workspace))
 
     if added and not silent:
         from rich.console import Console
         for name in added:
             Console().print(f"  [dim]Created {name}[/dim]")
+    return added
+
+
+def sync_builtin_skills(workspace: Path) -> list[str]:
+    """Sync bundled built-in skills to workspace/skills. Only creates missing files."""
+    skills_dir = workspace / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    builtin_root = Path(__file__).resolve().parent.parent / "skills"
+    if not builtin_root.is_dir():
+        return []
+
+    added: list[str] = []
+    for skill_dir in builtin_root.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        if not (skill_dir / "SKILL.md").exists():
+            continue
+
+        for src in skill_dir.rglob("*"):
+            if src.is_dir():
+                continue
+            rel = src.relative_to(skill_dir)
+            dest = skills_dir / skill_dir.name / rel
+            if dest.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+            try:
+                added.append(str(dest.relative_to(workspace)))
+            except Exception:
+                added.append(str(dest))
     return added

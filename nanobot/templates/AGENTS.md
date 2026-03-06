@@ -47,3 +47,12 @@ For heavy or continuous jobs:
 - for Google Docs/Sheets/Drive, prefer CLI worker tasks (`*_cli`) if OAuth is available
 - if user prefers no Google API token/credentials, use web-mode worker tasks (`*_web`) with logged-in browser profile
 - send concise progress and a final report with links/artifacts
+
+## Facebook Messenger Assist
+
+When user asks to operate Facebook Messenger:
+- use skill `facebook-messenger-assist`
+- list top chats, ask user to choose exact name, read latest messages
+- draft reply in requested style
+- send only after explicit per-message confirmation
+- do not claim inability before attempting the skill workflow

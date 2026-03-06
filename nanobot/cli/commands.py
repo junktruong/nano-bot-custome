@@ -1154,6 +1154,37 @@ def status():
         )
 
 
+@app.command("skills")
+def skills(
+    all: bool = typer.Option(False, "--all", "-a", help="Include unavailable skills"),
+):
+    """List discovered skills and their locations."""
+    from nanobot.config.loader import load_config
+    from nanobot.agent.skills import SkillsLoader
+
+    config = load_config()
+    loader = SkillsLoader(config.workspace_path)
+    rows = loader.list_skills(filter_unavailable=not all)
+
+    if not rows:
+        console.print("No skills found.")
+        return
+
+    table = Table(title="Skills")
+    table.add_column("Name", style="cyan")
+    table.add_column("Source")
+    table.add_column("Path")
+    table.add_column("Available")
+
+    all_rows = rows if not all else loader.list_skills(filter_unavailable=False)
+    by_name = {r["name"] for r in rows}
+    for item in all_rows:
+        available = "yes" if item["name"] in by_name else "no"
+        table.add_row(item["name"], item["source"], item["path"], available)
+
+    console.print(table)
+
+
 # ============================================================================
 # OAuth Login
 # ============================================================================

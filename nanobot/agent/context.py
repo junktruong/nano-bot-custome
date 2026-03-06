@@ -83,6 +83,7 @@ Your workspace is at: {workspace_path}
 - For long-running work, prefer background branching (`spawn`) and worker delegation (`extension_job`) with progress + final report.
 - For Google Workspace operations, prefer extension CLI-mode tasks (`*_cli`) when OAuth is configured.
 - If user does not want Google API credentials/tokens, use extension web-mode tasks (e.g. `google_docs_create_web`) and logged-in browser profile.
+- For Facebook/Messenger requests, use skill `facebook-messenger-assist`: list chats, open selected person, read latest messages, draft replies, and send only after explicit user confirmation.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 

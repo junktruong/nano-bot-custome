@@ -108,12 +108,35 @@ class ChatGPTWebProvider(LLMProvider):
                     len(images),
                     len(tools or []),
                 )
-                response = await self._submit_and_wait(
-                    page=page,
-                    session_key=session_key,
-                    prompt=prompt,
-                    image_paths=images,
-                )
+                response = ""
+                last_error: Exception | None = None
+                for attempt in range(1, 3):
+                    try:
+                        response = await self._submit_and_wait(
+                            page=page,
+                            session_key=session_key,
+                            prompt=prompt,
+                            image_paths=images,
+                        )
+                        last_error = None
+                        break
+                    except Exception as e:
+                        last_error = e
+                        transient = (
+                            "Cannot find ChatGPT composer" in str(e)
+                            or "Locator.click" in str(e)
+                            or "Message was not submitted" in str(e)
+                        )
+                        if attempt >= 2 or not transient:
+                            break
+                        logger.warning(
+                            "ChatGPT Web transient error (attempt {}/2), reloading page: {}",
+                            attempt,
+                            e,
+                        )
+                        await self._recover_page(page, session_key)
+                if last_error is not None:
+                    raise last_error
                 tool_calls, clean_content = self._extract_tool_calls(response, tools)
                 logger.debug(
                     "ChatGPT Web response: session={} response_len={} tool_calls={}",
@@ -210,6 +233,19 @@ class ChatGPTWebProvider(LLMProvider):
             "Cannot find ChatGPT composer. Ensure you are logged in at https://chatgpt.com/ "
             f"inside profile dir: {self.user_data_dir}"
         )
+
+    async def _recover_page(self, page: Any, session_key: str) -> None:
+        try:
+            await page.goto(self.chat_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                return
+        try:
+            await self._find_composer(page, session_key, max_wait_s=20.0)
+        except Exception:
+            pass
 
     async def _submit_and_wait(
         self,

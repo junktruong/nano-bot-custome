@@ -789,6 +789,9 @@ def channels_login():
 cron_app = typer.Typer(help="Manage scheduled tasks")
 app.add_typer(cron_app, name="cron")
 
+workspace_app = typer.Typer(help="Google Workspace CLI helpers (OAuth)")
+app.add_typer(workspace_app, name="workspace")
+
 
 @cron_app.command("list")
 def cron_list(
@@ -995,8 +998,78 @@ def cron_run(
 
 
 # ============================================================================
+# Google Workspace CLI Commands
+# ============================================================================
+
+
+@workspace_app.command("auth-login")
+def workspace_auth_login(
+    no_local_server: bool = typer.Option(
+        False,
+        "--no-local-server",
+        help="Use console/device flow (recommended on VPS without GUI)",
+    ),
+    python_bin: str = typer.Option("python3", "--python", help="Python executable for module runner"),
+):
+    """Login Google OAuth for Workspace CLI backend."""
+    import subprocess
+
+    cmd = [python_bin, "-m", "nanobot.extensions.google_workspace_cli", "auth", "login"]
+    if no_local_server:
+        cmd.append("--no-local-server")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        console.print(result.stdout.strip() or "[green]✓[/green] Login success")
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or "").strip()
+        console.print(f"[red]Workspace auth login failed:[/red] {detail}")
+        raise typer.Exit(1) from e
+
+
+@workspace_app.command("auth-status")
+def workspace_auth_status(
+    python_bin: str = typer.Option("python3", "--python", help="Python executable for module runner"),
+):
+    """Check Google OAuth status for Workspace CLI backend."""
+    import subprocess
+
+    cmd = [python_bin, "-m", "nanobot.extensions.google_workspace_cli", "auth", "status"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        console.print(result.stdout.strip() or "{}")
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or "").strip()
+        console.print(f"[red]Workspace auth status failed:[/red] {detail}")
+        raise typer.Exit(1) from e
+
+
+# ============================================================================
 # Status Commands
 # ============================================================================
+
+
+@app.command("extension-worker")
+def extension_worker(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host"),
+    port: int = typer.Option(7091, "--port", help="Bind port"),
+    workers: int = typer.Option(2, "--workers", min=1, help="Worker thread count"),
+    token: str = typer.Option(
+        "",
+        "--token",
+        envvar="NANOBOT_EXTENSION_TOKEN",
+        help="Bearer token for worker API auth (optional)",
+    ),
+):
+    """Run lightweight extension worker service for Docs/Sheets/Drive jobs."""
+    from nanobot.extensions.worker import run_extension_worker_server
+
+    run_extension_worker_server(
+        host=host,
+        port=port,
+        token=token,
+        worker_count=workers,
+    )
 
 
 @app.command()

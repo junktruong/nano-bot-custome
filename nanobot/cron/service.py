@@ -327,6 +327,54 @@ class CronService:
             logger.info("Cron: removed job {}", job_id)
         
         return removed
+
+    def get_job(self, job_id: str) -> CronJob | None:
+        """Get a job by ID."""
+        store = self._load_store()
+        for job in store.jobs:
+            if job.id == job_id:
+                return job
+        return None
+
+    def update_job(
+        self,
+        job_id: str,
+        *,
+        name: str | None = None,
+        message: str | None = None,
+        schedule: CronSchedule | None = None,
+        enabled: bool | None = None,
+        delete_after_run: bool | None = None,
+    ) -> CronJob | None:
+        """Update mutable fields of an existing job."""
+        store = self._load_store()
+        for job in store.jobs:
+            if job.id != job_id:
+                continue
+
+            if name is not None:
+                job.name = name
+            if message is not None:
+                job.payload.message = message
+            if schedule is not None:
+                _validate_schedule_for_add(schedule)
+                job.schedule = schedule
+            if enabled is not None:
+                job.enabled = enabled
+            if delete_after_run is not None:
+                job.delete_after_run = delete_after_run
+
+            job.updated_at_ms = _now_ms()
+            if job.enabled:
+                job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            else:
+                job.state.next_run_at_ms = None
+
+            self._save_store()
+            self._arm_timer()
+            logger.info("Cron: updated job {}", job.id)
+            return job
+        return None
     
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
         """Enable or disable a job."""

@@ -888,6 +888,9 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 | `nanobot agent --no-markdown` | Show plain-text replies |
 | `nanobot agent --logs` | Show runtime logs during chat |
 | `nanobot gateway` | Start the gateway |
+| `nanobot extension-worker` | Start extension job worker (Docs/Sheets/Drive) |
+| `nanobot workspace auth-login --no-local-server` | Login Google OAuth for Workspace CLI backend |
+| `nanobot workspace auth-status` | Check Google OAuth token status |
 | `nanobot status` | Show status |
 | `nanobot provider login openai-codex` | OAuth login for providers |
 | `nanobot channels login` | Link WhatsApp (scan QR) |
@@ -929,6 +932,74 @@ The gateway wakes up every 30 minutes and checks `HEARTBEAT.md` in your workspac
 The agent can also manage this file itself — ask it to "add a periodic task" and it will update `HEARTBEAT.md` for you.
 
 > **Note:** The gateway must be running (`nanobot gateway`) and you must have chatted with the bot at least once so it knows which channel to deliver to.
+
+</details>
+
+<details>
+<summary><b>Extension Worker (Google Docs/Sheets/Drive)</b></summary>
+
+Use extension workers for long-running operational jobs (research, reports, sheet updates, Drive uploads), while the main bot keeps chatting.
+
+Start worker:
+
+```bash
+nanobot extension-worker --host 127.0.0.1 --port 7091 --workers 2
+```
+
+Expose it to the agent (optional, default base URL is already `http://127.0.0.1:7091`):
+
+```bash
+export NANOBOT_EXTENSION_BASE_URL="http://127.0.0.1:7091"
+export NANOBOT_EXTENSION_TIMEOUT_SECONDS=300
+export NANOBOT_EXTENSION_POLL_SECONDS=3
+```
+
+Built-in task types:
+- CLI mode (recommended for speed/reliability after OAuth login once):
+- `google_docs_create_cli`
+- `google_docs_update_cli`
+- `google_sheet_append_cli`
+- `google_sheet_update_cli`
+- `google_drive_upload_cli`
+- `google_drive_move_cli`
+- Web mode (no Google API credentials needed):
+- `google_docs_create_web`
+- `google_docs_update_web`
+- `google_docs_open_web`
+- `google_sheets_open_web`
+- `google_drive_open_web`
+- API mode:
+- `google_docs_create`
+- `google_docs_update`
+- `google_sheet_append`
+- `google_sheet_update`
+- `google_drive_upload`
+- `google_drive_move`
+
+CLI mode setup (recommended):
+- put OAuth client JSON at:
+  `~/.nanobot/google/credentials.json`
+  or set:
+  `export NANOBOT_GOOGLE_OAUTH_CLIENT_FILE=/path/to/credentials.json`
+- login once:
+  `nanobot workspace auth-login --no-local-server`
+- verify:
+  `nanobot workspace auth-status`
+
+Web mode setup (if you prefer browser session automation):
+- set browser profile dir (optional, default shown):
+  `export NANOBOT_GOOGLE_WEB_PROFILE_DIR=~/.nanobot/playwright/google`
+- first login once with non-headless mode:
+  `export NANOBOT_GOOGLE_WEB_HEADLESS=false`
+- optional browser settings:
+  `export NANOBOT_GOOGLE_WEB_BROWSER_CHANNEL=chrome`
+  `export NANOBOT_GOOGLE_WEB_EXECUTABLE_PATH=/usr/bin/google-chrome`
+
+API mode credentials (optional):
+- set `GOOGLE_SERVICE_ACCOUNT_FILE=/path/to/service-account.json`
+- optional default folder: `GOOGLE_DRIVE_FOLDER_ID=...`
+- install dependencies in worker environment:
+  `pip install "nanobot-ai[google]"` (or `pip install google-api-python-client google-auth`)
 
 </details>
 

@@ -26,4 +26,6 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `memory` | Persist long-term facts and search event history |
 | `cron` | Schedule reminders and recurring tasks |
 | `research` | Research deeply, publish to Google Docs, return link |
-| `schedule-manager` | Manage schedules with separate reminder/research jobs |
+| `schedule-manager` | Full reminder CRUD, hourly/weekday scheduling, and day/week/month listing |
+| `daily-ops` | Run recurring daily workflows with supervision and reporting |
+| `google-workspace` | Execute Docs/Sheets/Drive actions via extension workers |

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import weakref
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -16,6 +18,7 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.extension_job import ExtensionJobTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -103,7 +106,7 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
-        self._processing_lock = asyncio.Lock()
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -123,6 +126,8 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        if extension_tool := ExtensionJobTool.from_env():
+            self.tools.register(extension_tool)
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -262,20 +267,38 @@ class AgentLoop:
             if msg.content.strip().lower() == "/stop":
                 await self._handle_stop(msg)
             else:
+                if self._is_session_busy(msg.session_key):
+                    branched = self._branch_message(msg)
+                    logger.info(
+                        "Session busy, branching {} -> {}",
+                        msg.session_key,
+                        branched.session_key,
+                    )
+                    msg = branched
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
-        tasks = self._active_tasks.pop(msg.session_key, [])
+        root = f"{msg.channel}:{msg.chat_id}"
+        matched_keys = [
+            key for key in list(self._active_tasks.keys())
+            if key == root or key.startswith(f"{root}:branch:")
+        ]
+        tasks: list[asyncio.Task] = []
+        for key in matched_keys:
+            tasks.extend(self._active_tasks.pop(key, []))
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
         for t in tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
-        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+
+        sub_cancelled = 0
+        for key in matched_keys or [msg.session_key]:
+            sub_cancelled += await self.subagents.cancel_by_session(key)
         total = cancelled + sub_cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(OutboundMessage(
@@ -284,7 +307,8 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the global lock."""
-        async with self._processing_lock:
+        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        async with lock:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -303,6 +327,19 @@ class AgentLoop:
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
                 ))
+
+    def _is_session_busy(self, session_key: str) -> bool:
+        tasks = self._active_tasks.get(session_key, [])
+        return any(not t.done() for t in tasks)
+
+    @staticmethod
+    def _branch_message(msg: InboundMessage) -> InboundMessage:
+        branch_suffix = msg.metadata.get("message_id") or str(int(time.time() * 1000))
+        safe_suffix = re.sub(r"[^a-zA-Z0-9_-]", "", str(branch_suffix))[:24] or "msg"
+        key = f"{msg.channel}:{msg.chat_id}:branch:{safe_suffix}"
+        meta = dict(msg.metadata or {})
+        meta["branched_from"] = f"{msg.channel}:{msg.chat_id}"
+        return replace(msg, session_key_override=key, metadata=meta)
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""

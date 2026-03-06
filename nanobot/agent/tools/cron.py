@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -367,6 +368,11 @@ class CronTool(Tool):
                 dt = datetime.fromisoformat(at)
             except Exception:
                 return "Error: invalid 'at' datetime. Use ISO format like 2026-03-03T10:20:00", False
+            if dt.tzinfo is None:
+                tz_for_at = self._resolve_tz(tz)
+                if isinstance(tz_for_at, str):
+                    return tz_for_at, False
+                dt = dt.replace(tzinfo=tz_for_at)
             at_ms = int(dt.timestamp() * 1000)
             return CronSchedule(kind="at", at_ms=at_ms), True
 
@@ -437,8 +443,12 @@ class CronTool(Tool):
         return ",".join(str(v) for v in ordered)
 
     @staticmethod
-    def _resolve_tz(tz: str | None) -> ZoneInfo | str:
-        zone = (tz or "").strip() or "Asia/Ho_Chi_Minh"
+    def _default_rtc_tz_name() -> str:
+        return (os.environ.get("NANOBOT_RTC_TIMEZONE", "UTC") or "").strip() or "UTC"
+
+    @classmethod
+    def _resolve_tz(cls, tz: str | None) -> ZoneInfo | str:
+        zone = (tz or "").strip() or cls._default_rtc_tz_name()
         try:
             return ZoneInfo(zone)
         except Exception:
@@ -504,7 +514,7 @@ class CronTool(Tool):
                 return f"every {sec // 60}m"
             return f"every {sec}s"
         if s.kind == "cron":
-            return f"cron '{s.expr}' ({s.tz or 'local'})"
+            return f"cron '{s.expr}' ({s.tz or self._default_rtc_tz_name()})"
         if s.kind == "at":
             if s.at_ms is None:
                 return "at <invalid>"
@@ -517,7 +527,7 @@ class CronTool(Tool):
         if ts is None:
             return "-"
         try:
-            tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else ZoneInfo("Asia/Ho_Chi_Minh")
+            tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else ZoneInfo(self._default_rtc_tz_name())
             return datetime.fromtimestamp(ts / 1000, tz=tz).strftime("%Y-%m-%d %H:%M:%S %Z")
         except Exception:
             return datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")

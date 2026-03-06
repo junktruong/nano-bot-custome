@@ -820,6 +820,11 @@ def cron_list(
     import time
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
+    rtc_tz_name = (os.environ.get("NANOBOT_RTC_TIMEZONE", "UTC") or "").strip() or "UTC"
+    try:
+        rtc_tz = ZoneInfo(rtc_tz_name)
+    except Exception:
+        rtc_tz = None
     for job in jobs:
         # Format schedule
         if job.schedule.kind == "every":
@@ -837,7 +842,10 @@ def cron_list(
                 tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else None
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
-                next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+                if rtc_tz is not None:
+                    next_run = _dt.fromtimestamp(ts, rtc_tz).strftime("%Y-%m-%d %H:%M")
+                else:
+                    next_run = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts))
         
         status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
         
@@ -875,6 +883,16 @@ def cron_add(
     elif at:
         import datetime
         dt = datetime.datetime.fromisoformat(at)
+        if dt.tzinfo is None:
+            rtc_tz_name = (os.environ.get("NANOBOT_RTC_TIMEZONE", "UTC") or "").strip() or "UTC"
+            try:
+                from zoneinfo import ZoneInfo
+
+                dt = dt.replace(tzinfo=ZoneInfo(rtc_tz_name))
+            except Exception:
+                from datetime import timezone
+
+                dt = dt.replace(tzinfo=timezone.utc)
         schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
     else:
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")

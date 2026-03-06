@@ -2,9 +2,10 @@
 
 import asyncio
 import json
+import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
@@ -34,7 +35,12 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             from zoneinfo import ZoneInfo
             # Use caller-provided reference time for deterministic scheduling
             base_time = now_ms / 1000
-            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            rtc_tz_name = (os.environ.get("NANOBOT_RTC_TIMEZONE", "UTC") or "").strip() or "UTC"
+            try:
+                rtc_tz = ZoneInfo(rtc_tz_name)
+            except Exception:
+                rtc_tz = timezone.utc
+            tz = ZoneInfo(schedule.tz) if schedule.tz else rtc_tz
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)

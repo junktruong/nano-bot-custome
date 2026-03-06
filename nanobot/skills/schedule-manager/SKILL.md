@@ -59,8 +59,7 @@ cron(
   name="morning-plan",
   message="Nhắc check kế hoạch buổi sáng",
   hour=5,
-  minute=0,
-  tz="Asia/Ho_Chi_Minh"
+  minute=0
 )
 ```
 
@@ -73,8 +72,7 @@ cron(
   message="Nhắc block học tập",
   hour=20,
   minute=0,
-  weekdays="mon,wed,fri",
-  tz="Asia/Ho_Chi_Minh"
+  weekdays="mon,wed,fri"
 )
 ```
 
@@ -92,8 +90,7 @@ cron(
   message="Nhắc mới đã chỉnh nội dung",
   hour=21,
   minute=30,
-  weekdays="2,4,6",
-  tz="Asia/Ho_Chi_Minh"
+  weekdays="2,4,6"
 )
 ```
 
@@ -123,22 +120,22 @@ cron(action="list", period="all")
 
 Today:
 ```python
-cron(action="list", period="day", tz="Asia/Ho_Chi_Minh")
+cron(action="list", period="day")
 ```
 
 This week:
 ```python
-cron(action="list", period="week", tz="Asia/Ho_Chi_Minh")
+cron(action="list", period="week")
 ```
 
 This month:
 ```python
-cron(action="list", period="month", tz="Asia/Ho_Chi_Minh")
+cron(action="list", period="month")
 ```
 
 Specific date anchor:
 ```python
-cron(action="list", period="week", date="2026-03-03", tz="Asia/Ho_Chi_Minh")
+cron(action="list", period="week", date="2026-03-03")
 ```
 
 ## Behavior Rules
@@ -149,5 +146,5 @@ cron(action="list", period="week", date="2026-03-03", tz="Asia/Ho_Chi_Minh")
   - job id
   - effective schedule
   - next run
-- For Vietnam users, default timezone should be `Asia/Ho_Chi_Minh` unless user says otherwise.
+- Default timezone must follow RTC timezone via `NANOBOT_RTC_TIMEZONE` (fallback `UTC`) unless user explicitly provides `tz`.
 - If there are multiple matching jobs and user request is ambiguous, ask which job id to edit/delete.

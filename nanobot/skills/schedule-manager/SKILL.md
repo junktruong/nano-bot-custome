@@ -146,5 +146,5 @@ cron(action="list", period="week", date="2026-03-03")
   - job id
   - effective schedule
   - next run
-- Default timezone must follow RTC timezone via `NANOBOT_RTC_TIMEZONE` (fallback `UTC`) unless user explicitly provides `tz`.
+- Default timezone must follow `NANOBOT_RTC_TIMEZONE`; if unset, use machine local timezone unless user explicitly provides `tz`.
 - If there are multiple matching jobs and user request is ambiguous, ask which job id to edit/delete.

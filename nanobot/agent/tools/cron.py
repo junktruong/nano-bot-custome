@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import os
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,6 +10,7 @@ from zoneinfo import ZoneInfo
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronSchedule
+from nanobot.utils.timezone import get_rtc_timezone_name
 
 
 class CronTool(Tool):
@@ -444,7 +444,7 @@ class CronTool(Tool):
 
     @staticmethod
     def _default_rtc_tz_name() -> str:
-        return (os.environ.get("NANOBOT_RTC_TIMEZONE", "UTC") or "").strip() or "UTC"
+        return get_rtc_timezone_name()
 
     @classmethod
     def _resolve_tz(cls, tz: str | None) -> ZoneInfo | str:

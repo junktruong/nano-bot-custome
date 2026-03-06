@@ -25,7 +25,7 @@ cron(action="list", period="month")
 After creating jobs:
 - return job IDs
 - summarize next run time
-- default timezone should follow RTC timezone (`NANOBOT_RTC_TIMEZONE`, fallback `UTC`) when user doesn't specify `tz`
+- default timezone should follow RTC timezone (`NANOBOT_RTC_TIMEZONE`), otherwise use machine local timezone when user doesn't specify `tz`
 
 **Do NOT just write reminders to MEMORY.md** — that won't trigger notifications.
 

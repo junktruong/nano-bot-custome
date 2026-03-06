@@ -914,7 +914,7 @@ nanobot cron remove <job_id>
 ```
 
 Timezone note:
-- Cron defaults to RTC timezone via `NANOBOT_RTC_TIMEZONE` (fallback `UTC`) when no `tz` is provided.
+- Cron defaults to RTC timezone via `NANOBOT_RTC_TIMEZONE`; if unset, it uses machine local timezone.
 - Example: `export NANOBOT_RTC_TIMEZONE=Asia/Ho_Chi_Minh`
 
 </details>

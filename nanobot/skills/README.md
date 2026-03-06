@@ -30,3 +30,4 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `daily-ops` | Run recurring daily workflows with supervision and reporting |
 | `google-workspace` | Execute Docs/Sheets/Drive actions via extension workers |
 | `facebook-messenger-assist` | Assist Messenger chat workflow (list/read/draft/send with explicit approval) |
+| `skill-checker` | Check discovered skills, availability status, and missing requirements |

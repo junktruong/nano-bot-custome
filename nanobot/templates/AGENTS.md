@@ -56,3 +56,10 @@ When user asks to operate Facebook Messenger:
 - draft reply in requested style
 - send only after explicit per-message confirmation
 - do not claim inability before attempting the skill workflow
+
+## Skill Inventory
+
+When user asks to check/list current skills in agent:
+- use skill `skill-checker`
+- report: total, available, unavailable
+- include missing requirements for unavailable skills

@@ -9,6 +9,7 @@ import mimetypes
 import re
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +77,11 @@ class ChatGPTWebProvider(LLMProvider):
 
         self._playwright: Any | None = None
         self._context: Any | None = None
-        self._lock = asyncio.Lock()
+        self._context_lock = asyncio.Lock()
+        self._page_alloc_lock = asyncio.Lock()
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._pages: dict[str, Any] = {}
+        self._warm_page: Any | None = None
         self._turn_count: dict[str, int] = {}
         self._composer_selector_hint: dict[str, str] = {}
         self._upload_dir = Path(self.user_data_dir) / "uploads"
@@ -96,9 +100,10 @@ class ChatGPTWebProvider(LLMProvider):
         del model, max_tokens, temperature  # Not supported by ChatGPT web UI.
 
         temp_files: list[Path] = []
-        async with self._lock:
+        session_key = self._extract_session_key(messages)
+        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        async with lock:
             try:
-                session_key = self._extract_session_key(messages)
                 page = await self._ensure_page(session_key)
                 prompt, images, temp_files = await self._build_turn_input(messages, session_key, tools)
                 logger.debug(
@@ -167,34 +172,37 @@ class ChatGPTWebProvider(LLMProvider):
     async def _ensure_context(self) -> Any:
         if self._context is not None:
             return self._context
+        async with self._context_lock:
+            if self._context is not None:
+                return self._context
 
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as e:
-            raise RuntimeError(
-                "Playwright is not installed. Run: pip install playwright && playwright install chromium"
-            ) from e
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError as e:
+                raise RuntimeError(
+                    "Playwright is not installed. Run: pip install playwright && playwright install chromium"
+                ) from e
 
-        Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-        self._upload_dir.mkdir(parents=True, exist_ok=True)
+            Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            self._upload_dir.mkdir(parents=True, exist_ok=True)
 
-        self._playwright = await async_playwright().start()
-        launch_opts: dict[str, Any] = {
-            "user_data_dir": self.user_data_dir,
-            "headless": self.headless,
-            "viewport": {"width": 1440, "height": 960},
-            "ignore_default_args": ["--enable-automation"],
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        }
-        if self.browser_channel:
-            launch_opts["channel"] = self.browser_channel
-        if self.executable_path:
-            launch_opts["executable_path"] = self.executable_path
-        self._context = await self._playwright.chromium.launch_persistent_context(**launch_opts)
+            self._playwright = await async_playwright().start()
+            launch_opts: dict[str, Any] = {
+                "user_data_dir": self.user_data_dir,
+                "headless": self.headless,
+                "viewport": {"width": 1440, "height": 960},
+                "ignore_default_args": ["--enable-automation"],
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            }
+            if self.browser_channel:
+                launch_opts["channel"] = self.browser_channel
+            if self.executable_path:
+                launch_opts["executable_path"] = self.executable_path
+            self._context = await self._playwright.chromium.launch_persistent_context(**launch_opts)
         return self._context
 
     async def _ensure_page(self, session_key: str) -> Any:
@@ -203,12 +211,66 @@ class ChatGPTWebProvider(LLMProvider):
         if page is not None and not page.is_closed():
             return page
 
-        page = await context.new_page()
-        self._pages[session_key] = page
-        self._turn_count.setdefault(session_key, 0)
-        await page.goto(self.chat_url, wait_until="domcontentloaded", timeout=30000)
-        await self._find_composer(page, session_key, max_wait_s=30.0)
+        created_new = False
+        async with self._page_alloc_lock:
+            page = self._pages.get(session_key)
+            if page is not None and not page.is_closed():
+                return page
+
+            if self._warm_page is not None and not self._warm_page.is_closed():
+                page = self._warm_page
+                self._warm_page = None
+                self._pages[session_key] = page
+                self._turn_count.setdefault(session_key, 0)
+                logger.debug("ChatGPT Web warm page claimed for session={}", session_key)
+                return page
+
+            page = await context.new_page()
+            self._pages[session_key] = page
+            self._turn_count.setdefault(session_key, 0)
+            created_new = True
+
+        if created_new:
+            try:
+                await page.goto(self.chat_url, wait_until="domcontentloaded", timeout=30000)
+                await self._find_composer(page, session_key, max_wait_s=30.0)
+            except Exception:
+                async with self._page_alloc_lock:
+                    if self._pages.get(session_key) is page:
+                        self._pages.pop(session_key, None)
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                raise
         return page
+
+    async def warmup(self) -> None:
+        """Best-effort warmup to reduce first-message latency after startup."""
+        context = await self._ensure_context()
+        async with self._page_alloc_lock:
+            if self._warm_page is not None and not self._warm_page.is_closed():
+                return
+            page = await context.new_page()
+            self._warm_page = page
+
+        try:
+            await page.goto(self.chat_url, wait_until="domcontentloaded", timeout=30000)
+            # Non-fatal: login gates can block composer until user signs in.
+            try:
+                await self._find_composer(page, "__warmup__", max_wait_s=8.0)
+            except Exception as e:
+                logger.debug("ChatGPT Web warmup composer not ready yet: {}", e)
+            logger.info("ChatGPT Web warmup page is ready")
+        except Exception:
+            async with self._page_alloc_lock:
+                if self._warm_page is page:
+                    self._warm_page = None
+            try:
+                await page.close()
+            except Exception:
+                pass
+            raise
 
     async def _find_composer(self, page: Any, session_key: str, max_wait_s: float = 8.0) -> Any:
         selectors = list(_COMPOSER_SELECTORS)
@@ -265,8 +327,7 @@ class ChatGPTWebProvider(LLMProvider):
             except Exception:
                 baseline_text = ""
 
-        composer = await self._find_composer(page, session_key, max_wait_s=8.0)
-        await self._focus_composer_soft(composer)
+        composer = await self._find_composer(page, session_key, max_wait_s=4.0)
         if image_paths:
             await self._attach_images(page, image_paths)
 
@@ -364,21 +425,7 @@ class ChatGPTWebProvider(LLMProvider):
                 continue
 
     async def _set_composer_text(self, page: Any, composer: Any, text: str) -> None:
-        await self._focus_composer_soft(composer)
-
-        # Preferred path for textarea/input.
-        try:
-            await composer.fill(text)
-            return
-        except Exception:
-            pass
-
-        # Fallback for contenteditable composers used by newer ChatGPT web UIs.
-        try:
-            await composer.click(timeout=1000)
-        except Exception:
-            pass
-
+        # Fast path: direct DOM write for both input and contenteditable composers.
         try:
             await composer.evaluate(
                 """(el, value) => {
@@ -407,22 +454,37 @@ class ChatGPTWebProvider(LLMProvider):
         except Exception:
             pass
 
+        await self._focus_composer_soft(composer)
+
+        # Fallback path for textarea/input.
+        try:
+            await composer.fill(text, timeout=700)
+            return
+        except Exception:
+            pass
+
+        # Fallback click path when direct write fails.
+        try:
+            await composer.click(timeout=700)
+        except Exception:
+            pass
+
         # Last-resort keyboard typing if DOM write paths fail.
         await page.keyboard.type(text, delay=0)
 
     async def _focus_composer_soft(self, composer: Any) -> None:
         # Best-effort focus: never raise.
         try:
-            await composer.scroll_into_view_if_needed(timeout=1000)
+            await composer.scroll_into_view_if_needed(timeout=500)
         except Exception:
             pass
         try:
-            await composer.click(timeout=2500)
+            await composer.click(timeout=700)
             return
         except Exception:
             pass
         try:
-            await composer.click(timeout=2500, force=True)
+            await composer.click(timeout=700, force=True)
             return
         except Exception:
             pass

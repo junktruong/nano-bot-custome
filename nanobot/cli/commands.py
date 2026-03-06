@@ -389,9 +389,26 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
     
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+
+    async def _maybe_warm_provider() -> None:
+        warmup = getattr(provider, "warmup", None)
+        if warmup is None:
+            return
+        try:
+            await warmup()
+        except Exception as e:
+            from loguru import logger
+            logger.warning("Provider warmup skipped: {}", e)
     
     async def run():
+        warmup_task: asyncio.Task | None = None
         try:
+            warmup_task = asyncio.create_task(_maybe_warm_provider())
+            try:
+                # Give warmup a short head start without blocking full startup.
+                await asyncio.wait_for(asyncio.shield(warmup_task), timeout=6.0)
+            except asyncio.TimeoutError:
+                pass
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
@@ -401,6 +418,8 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
+            if warmup_task is not None and not warmup_task.done():
+                warmup_task.cancel()
             await agent.close_mcp()
             heartbeat.stop()
             cron.stop()

@@ -939,6 +939,22 @@ def cron_remove(
         console.print(f"[red]Job {job_id} not found[/red]")
 
 
+@cron_app.command("clear")
+def cron_clear():
+    """Remove all scheduled jobs."""
+    from nanobot.config.loader import get_data_dir
+    from nanobot.cron.service import CronService
+
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+
+    removed = service.clear_jobs()
+    if removed > 0:
+        console.print(f"[green]✓[/green] Cleared {removed} job(s)")
+    else:
+        console.print("No scheduled jobs to clear.")
+
+
 @cron_app.command("enable")
 def cron_enable(
     job_id: str = typer.Argument(..., help="Job ID"),

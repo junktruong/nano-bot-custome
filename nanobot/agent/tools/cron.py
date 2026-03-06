@@ -34,7 +34,7 @@ class CronTool(Tool):
     def description(self) -> str:
         return (
             "Schedule reminders and recurring tasks. "
-            "Actions: add, list, remove, delete, update, edit, enable, disable."
+            "Actions: add, list, remove, delete, update, edit, enable, disable, clear, reset."
         )
 
     @property
@@ -44,12 +44,15 @@ class CronTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "list", "remove", "delete", "update", "edit", "enable", "disable"],
+                    "enum": [
+                        "add", "list", "remove", "delete", "update", "edit",
+                        "enable", "disable", "clear", "reset", "remove_all",
+                    ],
                     "description": "Action to perform",
                 },
                 "job_id": {
                     "type": "string",
-                    "description": "Job ID (required for remove/update/enable/disable)",
+                    "description": "Job ID (required for remove/update/enable/disable). Use 'all' to clear all.",
                 },
                 "name": {
                     "type": "string",
@@ -149,6 +152,8 @@ class CronTool(Tool):
             return self._list_jobs(period=period, date=date, tz=tz, include_disabled=include_disabled)
         if act in {"remove", "delete"}:
             return self._remove_job(job_id)
+        if act in {"clear", "reset", "remove_all"}:
+            return self._clear_jobs()
         if act in {"update", "edit"}:
             return self._update_job(
                 job_id=job_id,
@@ -274,9 +279,17 @@ class CronTool(Tool):
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
             return "Error: job_id is required for remove"
+        if (job_id or "").strip().lower() in {"all", "*", "tatca", "toanbo"}:
+            return self._clear_jobs()
         if self._cron.remove_job(job_id):
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
+
+    def _clear_jobs(self) -> str:
+        removed = self._cron.clear_jobs()
+        if removed <= 0:
+            return "No scheduled jobs to clear."
+        return f"Cleared {removed} scheduled job(s)."
 
     def _enable_disable(self, job_id: str | None, enabled: bool) -> str:
         if not job_id:

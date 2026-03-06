@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from datetime import datetime
@@ -16,6 +17,15 @@ from nanobot.utils.timezone import get_rtc_zoneinfo
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _normalize_job_id(raw: str | None) -> str:
+    text = (raw or "").strip().strip("`'\"")
+    if not text:
+        return ""
+    # Accept strings like "id: abc12345" or "(abc12345)".
+    m = re.search(r"([A-Za-z0-9][A-Za-z0-9_-]{3,127})", text)
+    return (m.group(1) if m else text).strip()
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
@@ -319,22 +329,40 @@ class CronService:
     def remove_job(self, job_id: str) -> bool:
         """Remove a job by ID."""
         store = self._load_store()
+        resolved = self._resolve_job_id(job_id, store=store)
+        if not resolved:
+            return False
         before = len(store.jobs)
-        store.jobs = [j for j in store.jobs if j.id != job_id]
+        store.jobs = [j for j in store.jobs if j.id != resolved]
         removed = len(store.jobs) < before
         
         if removed:
             self._save_store()
             self._arm_timer()
-            logger.info("Cron: removed job {}", job_id)
+            logger.info("Cron: removed job {}", resolved)
         
+        return removed
+
+    def clear_jobs(self) -> int:
+        """Remove all jobs and return number of removed jobs."""
+        store = self._load_store()
+        removed = len(store.jobs)
+        if removed <= 0:
+            return 0
+        store.jobs = []
+        self._save_store()
+        self._arm_timer()
+        logger.info("Cron: cleared {} jobs", removed)
         return removed
 
     def get_job(self, job_id: str) -> CronJob | None:
         """Get a job by ID."""
         store = self._load_store()
+        resolved = self._resolve_job_id(job_id, store=store)
+        if not resolved:
+            return None
         for job in store.jobs:
-            if job.id == job_id:
+            if job.id == resolved:
                 return job
         return None
 
@@ -350,8 +378,11 @@ class CronService:
     ) -> CronJob | None:
         """Update mutable fields of an existing job."""
         store = self._load_store()
+        resolved = self._resolve_job_id(job_id, store=store)
+        if not resolved:
+            return None
         for job in store.jobs:
-            if job.id != job_id:
+            if job.id != resolved:
                 continue
 
             if name is not None:
@@ -381,8 +412,11 @@ class CronService:
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
         """Enable or disable a job."""
         store = self._load_store()
+        resolved = self._resolve_job_id(job_id, store=store)
+        if not resolved:
+            return None
         for job in store.jobs:
-            if job.id == job_id:
+            if job.id == resolved:
                 job.enabled = enabled
                 job.updated_at_ms = _now_ms()
                 if enabled:
@@ -397,8 +431,11 @@ class CronService:
     async def run_job(self, job_id: str, force: bool = False) -> bool:
         """Manually run a job."""
         store = self._load_store()
+        resolved = self._resolve_job_id(job_id, store=store)
+        if not resolved:
+            return False
         for job in store.jobs:
-            if job.id == job_id:
+            if job.id == resolved:
                 if not force and not job.enabled:
                     return False
                 await self._execute_job(job)
@@ -406,6 +443,22 @@ class CronService:
                 self._arm_timer()
                 return True
         return False
+
+    @staticmethod
+    def _resolve_job_id(job_id: str | None, store: CronStore) -> str | None:
+        target = _normalize_job_id(job_id)
+        if not target:
+            return None
+        lower = target.lower()
+
+        exact = [j.id for j in store.jobs if j.id.lower() == lower]
+        if exact:
+            return exact[0]
+
+        prefixed = [j.id for j in store.jobs if j.id.lower().startswith(lower)]
+        if len(prefixed) == 1:
+            return prefixed[0]
+        return None
     
     def status(self) -> dict:
         """Get service status."""

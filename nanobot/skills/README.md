@@ -29,3 +29,4 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `schedule-manager` | Full reminder CRUD, hourly/weekday scheduling, and day/week/month listing |
 | `daily-ops` | Run recurring daily workflows with supervision and reporting |
 | `google-workspace` | Execute Docs/Sheets/Drive actions via extension workers |
+| `facebook-messenger-assist` | Assist Messenger chat workflow (list/read/draft/send with explicit approval) |

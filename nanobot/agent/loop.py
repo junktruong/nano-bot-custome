@@ -158,6 +158,37 @@ class AgentLoop:
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
 
+    def _extract_requested_skills(self, content: str) -> list[str]:
+        """Extract explicitly requested skill names from user message text."""
+        text = (content or "").lower()
+        if "skill" not in text and "$" not in text:
+            return []
+
+        available = {
+            item["name"]
+            for item in self.context.skills.list_skills(filter_unavailable=False)
+        }
+        if not available:
+            return []
+
+        requested: list[str] = []
+        seen: set[str] = set()
+
+        def _add(name: str) -> None:
+            candidate = (name or "").strip().lower()
+            if not candidate or candidate in seen:
+                return
+            if candidate in available:
+                seen.add(candidate)
+                requested.append(candidate)
+
+        for m in re.finditer(r"\$([a-z0-9][a-z0-9-]{1,63})", text):
+            _add(m.group(1))
+        for m in re.finditer(r"\bskill\s+([a-z0-9][a-z0-9-]{1,63})\b", text):
+            _add(m.group(1))
+
+        return requested
+
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -371,9 +402,10 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
+            requested_skills = self._extract_requested_skills(msg.content)
             messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
+                history=history, current_message=msg.content, skill_names=requested_skills,
+                channel=channel, chat_id=chat_id,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -445,9 +477,13 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+        requested_skills = self._extract_requested_skills(msg.content)
+        if requested_skills:
+            logger.info("Explicit skill request detected: {}", ", ".join(requested_skills))
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
+            skill_names=requested_skills,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )

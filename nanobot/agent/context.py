@@ -41,6 +41,13 @@ class ContextBuilder:
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
+        if skill_names:
+            requested = [s for s in skill_names if s and s not in set(always_skills)]
+            if requested:
+                requested_content = self.skills.load_skills_for_context(requested)
+                if requested_content:
+                    parts.append(f"# Requested Skills\n\n{requested_content}")
+
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
             parts.append(f"""# Skills

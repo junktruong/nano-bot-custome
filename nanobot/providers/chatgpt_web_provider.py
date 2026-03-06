@@ -524,6 +524,7 @@ class ChatGPTWebProvider(LLMProvider):
         session_key: str,
         tools: list[dict[str, Any]] | None,
     ) -> tuple[str, list[str], list[Path]]:
+        runtime_context = self._extract_latest_runtime_context(messages)
         latest_text, latest_images, temp_files = await self._extract_latest_user_input(messages)
 
         # During tool loop, include recent tool context so the model can continue.
@@ -537,6 +538,8 @@ class ChatGPTWebProvider(LLMProvider):
 
         if tools:
             latest_text = self._append_tool_hint(latest_text)
+        if runtime_context:
+            latest_text = f"{runtime_context}\n\n{latest_text}".strip()
         return latest_text, latest_images, temp_files
 
     async def _extract_latest_user_input(
@@ -625,6 +628,18 @@ class ChatGPTWebProvider(LLMProvider):
         if content is None:
             return ""
         return str(content)
+
+    @staticmethod
+    def _extract_latest_runtime_context(messages: list[dict[str, Any]]) -> str:
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text.startswith(_RUNTIME_TAG):
+                    return text
+        return ""
 
     def _messages_to_prompt(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> str:
         # Bootstrap only: keep context bounded to reduce initial compose latency.

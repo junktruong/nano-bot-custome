@@ -3,13 +3,13 @@
 import base64
 import mimetypes
 import platform
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.utils.timezone import get_rtc_timezone_name, get_rtc_zoneinfo
 
 
 class ContextBuilder:
@@ -89,9 +89,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = time.strftime("%Z") or "UTC"
-        lines = [f"Current Time: {now} ({tz})"]
+        tz_name = get_rtc_timezone_name()
+        tz = get_rtc_zoneinfo()
+        now = datetime.now(tz).strftime("%Y-%m-%d %H:%M (%A)")
+        lines = [
+            f"Current Time: {now} ({tz_name})",
+            f"Active Timezone: {tz_name}",
+        ]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)

@@ -52,7 +52,7 @@ class CronTool(Tool):
                 },
                 "job_id": {
                     "type": "string",
-                    "description": "Job ID (required for remove/update/enable/disable). Use 'all' to clear all.",
+                    "description": "Job ID for remove/update/enable/disable. Use 'all' to clear all.",
                 },
                 "name": {
                     "type": "string",
@@ -151,7 +151,7 @@ class CronTool(Tool):
         if act == "list":
             return self._list_jobs(period=period, date=date, tz=tz, include_disabled=include_disabled)
         if act in {"remove", "delete"}:
-            return self._remove_job(job_id)
+            return self._remove_job(job_id=job_id, name=name)
         if act in {"clear", "reset", "remove_all"}:
             return self._clear_jobs()
         if act in {"update", "edit"}:
@@ -276,14 +276,29 @@ class CronTool(Tool):
             f"Next run: {self._format_next_run(job)}"
         )
 
-    def _remove_job(self, job_id: str | None) -> str:
-        if not job_id:
-            return "Error: job_id is required for remove"
-        if (job_id or "").strip().lower() in {"all", "*", "tatca", "toanbo"}:
+    def _remove_job(self, job_id: str | None, name: str | None = None) -> str:
+        key = (job_id or "").strip()
+        if key.lower() in {"all", "*", "tatca", "toanbo"}:
             return self._clear_jobs()
-        if self._cron.remove_job(job_id):
-            return f"Removed job {job_id}"
-        return f"Job {job_id} not found"
+        if key:
+            if self._cron.remove_job(key):
+                return f"Removed job {key}"
+            return f"Job {key} not found"
+
+        target = (name or "").strip().lower()
+        if not target:
+            return "Error: job_id (or name) is required for remove"
+        jobs = self._cron.list_jobs(include_disabled=True)
+        matches = [j for j in jobs if target in (j.name or "").strip().lower()]
+        if not matches:
+            return f"Job name '{name}' not found"
+        if len(matches) > 1:
+            ids = ", ".join(j.id for j in matches[:8])
+            return f"Multiple jobs matched name '{name}'. Use job_id. Matches: {ids}"
+        picked = matches[0]
+        if self._cron.remove_job(picked.id):
+            return f"Removed job {picked.id} ({picked.name})"
+        return f"Job {picked.id} not found"
 
     def _clear_jobs(self) -> str:
         removed = self._cron.clear_jobs()

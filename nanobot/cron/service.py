@@ -222,7 +222,11 @@ class CronService:
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
-        logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
+        logger.info(
+            "Cron service started with {} jobs (store={})",
+            len(self._store.jobs if self._store else []),
+            self.store_path,
+        )
     
     def stop(self) -> None:
         """Stop the cron service."""

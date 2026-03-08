@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -46,7 +47,7 @@ class CronTool(Tool):
                     "type": "string",
                     "enum": [
                         "add", "list", "remove", "delete", "update", "edit",
-                        "enable", "disable", "clear", "reset", "remove_all",
+                        "enable", "disable", "clear", "reset", "remove_all", "debug",
                     ],
                     "description": "Action to perform",
                 },
@@ -154,6 +155,8 @@ class CronTool(Tool):
             return self._remove_job(job_id=job_id, name=name)
         if act in {"clear", "reset", "remove_all"}:
             return self._clear_jobs()
+        if act == "debug":
+            return self._debug_status()
         if act in {"update", "edit"}:
             return self._update_job(
                 job_id=job_id,
@@ -303,8 +306,40 @@ class CronTool(Tool):
     def _clear_jobs(self) -> str:
         removed = self._cron.clear_jobs()
         if removed <= 0:
-            return "No scheduled jobs to clear."
-        return f"Cleared {removed} scheduled job(s)."
+            return f"No scheduled jobs to clear. (store={self._cron.store_path})"
+        return f"Cleared {removed} scheduled job(s). (store={self._cron.store_path})"
+
+    def _debug_status(self) -> str:
+        store_path = self._cron.store_path
+        jobs = self._cron.list_jobs(include_disabled=True)
+        mem_count = len(jobs)
+
+        disk_count = None
+        disk_error = None
+        try:
+            if store_path.exists():
+                data = json.loads(store_path.read_text(encoding="utf-8"))
+                disk_count = len((data or {}).get("jobs", []))
+            else:
+                disk_count = 0
+        except Exception as e:
+            disk_error = str(e)
+
+        ids = ", ".join(j.id for j in jobs[:20]) if jobs else "-"
+        lines = [
+            f"Cron debug:",
+            f"- store: {store_path}",
+            f"- memory_jobs: {mem_count}",
+            f"- disk_jobs: {disk_count if disk_count is not None else 'unknown'}",
+            f"- sample_ids: {ids}",
+        ]
+        if disk_error:
+            lines.append(f"- disk_error: {disk_error}")
+        if disk_count is not None and disk_count != mem_count:
+            lines.append("- mismatch: true (memory and disk are different)")
+        else:
+            lines.append("- mismatch: false")
+        return "\n".join(lines)
 
     def _enable_disable(self, job_id: str | None, enabled: bool) -> str:
         if not job_id:

@@ -197,6 +197,68 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
+    def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+        """Get latest non-runtime user text from message list."""
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            text = content.strip()
+            if not text or text.startswith("[Runtime Context"):
+                continue
+            return text
+        return ""
+
+    @staticmethod
+    def _looks_like_reminder_request(text: str) -> bool:
+        low = (text or "").lower()
+        if not low:
+            return False
+        hints = (
+            "nhắc",
+            "nhac",
+            "lịch",
+            "lich",
+            "hẹn giờ",
+            "hen gio",
+            "báo thức",
+            "bao thuc",
+            "đặt lịch",
+            "dat lich",
+            "remind",
+            "reminder",
+            "schedule",
+        )
+        return any(h in low for h in hints)
+
+    @staticmethod
+    def _looks_like_tool_unavailable_reply(text: str) -> bool:
+        low = (text or "").lower()
+        if not low:
+            return False
+        unavailable_hints = (
+            "không khả dụng",
+            "khong kha dung",
+            "không có tool",
+            "khong co tool",
+            "không có công cụ",
+            "khong co cong cu",
+            "không thể",
+            "khong the",
+            "cannot",
+            "can't",
+            "manual",
+            "cli",
+            "chạy lệnh",
+            "huong dan",
+            "hướng dẫn",
+        )
+        cron_related = ("cron", "nhắc", "nhac", "lịch", "lich", "schedule", "remind")
+        return any(h in low for h in unavailable_hints) and any(c in low for c in cron_related)
+
+    @staticmethod
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
@@ -217,6 +279,9 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        cron_force_retry_used = False
+        latest_user_text = self._latest_user_text(initial_messages)
+        reminder_intent = self._looks_like_reminder_request(latest_user_text)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -268,6 +333,33 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
+
+                should_force_cron_retry = (
+                    not cron_force_retry_used
+                    and iteration == 1
+                    and reminder_intent
+                    and self.tools.has("cron")
+                    and self._looks_like_tool_unavailable_reply(clean or "")
+                )
+                if should_force_cron_retry:
+                    cron_force_retry_used = True
+                    logger.warning(
+                        "Cron guardrail retry: model refused tool on reminder request, forcing tool-call retry"
+                    )
+                    messages = self.context.add_assistant_message(
+                        messages, clean, reasoning_content=response.reasoning_content,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "System correction: tool `cron` is available now. "
+                            "For reminder/schedule requests, call `cron` directly and do NOT ask the user "
+                            "to run manual CLI commands. "
+                            "Return exactly one <tool_call> JSON for the next action."
+                        ),
+                    })
+                    continue
+
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
                 )

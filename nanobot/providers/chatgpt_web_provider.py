@@ -724,6 +724,15 @@ class ChatGPTWebProvider(LLMProvider):
         payload_texts.extend(m.group(1).strip() for m in _TOOL_CALL_TAG_RE.finditer(text))
         payload_texts.extend(m.group(1).strip() for m in _TOOL_CALLS_TAG_RE.finditer(text))
 
+        # Recover from malformed output where model emits "<tool_call>{...}" but
+        # forgets the closing tag.
+        if not payload_texts:
+            lower = text.lower()
+            if "<tool_call>" in lower:
+                payload_texts.append(text[text.lower().find("<tool_call>") + len("<tool_call>"):].strip())
+            elif "<tool_calls>" in lower:
+                payload_texts.append(text[text.lower().find("<tool_calls>") + len("<tool_calls>"):].strip())
+
         stripped = text.strip()
         if not payload_texts:
             if stripped.startswith("{") or stripped.startswith("["):
@@ -754,6 +763,7 @@ class ChatGPTWebProvider(LLMProvider):
 
         clean = _TOOL_CALL_TAG_RE.sub("", text)
         clean = _TOOL_CALLS_TAG_RE.sub("", clean)
+        clean = re.sub(r"<tool_calls?>\s*", "", clean, flags=re.I)
         content_from_message_tool = ""
         filtered_calls: list[ToolCallRequest] = []
         for call in calls:
@@ -782,7 +792,67 @@ class ChatGPTWebProvider(LLMProvider):
         try:
             return json.loads(raw)
         except Exception:
+            candidate = ChatGPTWebProvider._extract_first_json_blob(raw)
+            if candidate:
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    return None
             return None
+
+    @staticmethod
+    def _extract_first_json_blob(raw: str) -> str | None:
+        text = (raw or "").strip()
+        if not text:
+            return None
+        start = -1
+        opener = ""
+        for ch in text:
+            if ch in "{[":
+                opener = ch
+                break
+        if not opener:
+            return None
+        start = text.find(opener)
+        if start < 0:
+            return None
+
+        stack: list[str] = [opener]
+        in_string = False
+        escaped = False
+        quote_char = '"'
+
+        for idx in range(start + 1, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote_char:
+                    in_string = False
+                continue
+
+            if ch in ("'", '"'):
+                in_string = True
+                quote_char = ch
+                continue
+            if ch in "{[":
+                stack.append(ch)
+                continue
+            if ch in "}]":
+                if not stack:
+                    return None
+                top = stack[-1]
+                if (top == "{" and ch != "}") or (top == "[" and ch != "]"):
+                    return None
+                stack.pop()
+                if not stack:
+                    return text[start:idx + 1]
+
+        return None
 
     def _normalize_tool_payload(self, parsed: Any) -> list[tuple[str, dict[str, Any]]]:
         entries: list[Any] = []

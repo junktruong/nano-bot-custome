@@ -19,7 +19,7 @@ Use this skill to help the user manage Messenger chats from their own logged-in 
 
 Use script:
 
-`nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py`
+`skills/facebook-messenger-assist/scripts/messenger_web.py`
 
 It supports:
 
@@ -30,14 +30,14 @@ It supports:
 ## Standard Workflow
 
 1. List first 10 chats:
-- `python3 nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py list-chats --limit 10`
+- `python3 skills/facebook-messenger-assist/scripts/messenger_web.py list-chats --limit 10`
 2. Ask user to pick one exact name from the list.
 3. Read latest messages:
-- `python3 nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py read-chat --name "Nguyen Van A" --limit 20`
+- `python3 skills/facebook-messenger-assist/scripts/messenger_web.py read-chat --name "Nguyen Van A" --limit 20`
 4. Ask user for conversation style and intent.
 5. Draft reply in that style.
 6. Send only after user confirms:
-- `python3 nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py send-message --name "Nguyen Van A" --text "..." --approve-send`
+- `python3 skills/facebook-messenger-assist/scripts/messenger_web.py send-message --name "Nguyen Van A" --text "..." --approve-send`
 7. Repeat read -> draft -> confirm -> send.
 
 ## Notes

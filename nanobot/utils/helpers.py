@@ -97,4 +97,27 @@ def sync_builtin_skills(workspace: Path) -> list[str]:
                 added.append(str(dest.relative_to(workspace)))
             except Exception:
                 added.append(str(dest))
+
+    _migrate_legacy_skill_paths(skills_dir)
     return added
+
+
+def _migrate_legacy_skill_paths(skills_dir: Path) -> None:
+    """Best-effort migration for legacy script paths in copied skills."""
+    skill_md = skills_dir / "facebook-messenger-assist" / "SKILL.md"
+    if not skill_md.exists():
+        return
+    try:
+        content = skill_md.read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    legacy = "nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py"
+    new = "skills/facebook-messenger-assist/scripts/messenger_web.py"
+    if legacy not in content:
+        return
+
+    try:
+        skill_md.write_text(content.replace(legacy, new), encoding="utf-8")
+    except Exception:
+        return

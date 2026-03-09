@@ -92,6 +92,7 @@ Your workspace is at: {workspace_path}
 - If user does not want Google API credentials/tokens, use extension web-mode tasks (e.g. `google_docs_create_web`) and logged-in browser profile.
 - For Facebook/Messenger requests, use skill `facebook-messenger-assist`: list chats, open selected person, read latest messages, draft replies, and send only after explicit user confirmation.
 - For "check/list skills" requests, use skill `skill-checker` and return available/unavailable skills with missing requirements.
+- If a skill is listed in `<skills>` summary, do not claim it is missing. Read that SKILL.md via `read_file` and follow it.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 

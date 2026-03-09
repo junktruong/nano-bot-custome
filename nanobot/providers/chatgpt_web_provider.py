@@ -531,6 +531,8 @@ class ChatGPTWebProvider(LLMProvider):
         if self._has_pending_tool_context(messages):
             return self._messages_to_prompt(messages, tools=tools), [], temp_files
 
+        requested_skills_block = self._extract_requested_skills_block(messages)
+
         # First turn of a browser session: bootstrap with full prompt once.
         if self._turn_count.get(session_key, 0) == 0:
             bootstrap = self._messages_to_prompt(messages, tools=tools)
@@ -540,6 +542,12 @@ class ChatGPTWebProvider(LLMProvider):
             latest_text = self._append_tool_hint(latest_text)
         if runtime_context:
             latest_text = f"{runtime_context}\n\n{latest_text}".strip()
+        if requested_skills_block:
+            latest_text = (
+                f"{requested_skills_block}\n\n"
+                f"Apply the requested skill(s) above for this turn.\n\n"
+                f"{latest_text}"
+            ).strip()
         return latest_text, latest_images, temp_files
 
     async def _extract_latest_user_input(
@@ -639,6 +647,32 @@ class ChatGPTWebProvider(LLMProvider):
                 text = content.strip()
                 if text.startswith(_RUNTIME_TAG):
                     return text
+        return ""
+
+    @staticmethod
+    def _extract_requested_skills_block(messages: list[dict[str, Any]]) -> str:
+        for msg in messages:
+            if msg.get("role") != "system":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+
+            marker = "# Requested Skills"
+            idx = content.find(marker)
+            if idx < 0:
+                continue
+            tail = content[idx:]
+
+            # Prefer truncating at the next major section delimiter.
+            end = tail.find("\n\n---\n\n# Skills")
+            if end >= 0:
+                tail = tail[:end]
+
+            tail = tail.strip()
+            if not tail:
+                return ""
+            return tail[:6000]
         return ""
 
     def _messages_to_prompt(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> str:

@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+import unicodedata
 
 from loguru import logger
 
@@ -161,7 +162,7 @@ class AgentLoop:
     def _extract_requested_skills(self, content: str) -> list[str]:
         """Extract explicitly requested skill names from user message text."""
         text = (content or "").lower()
-        if "skill" not in text and "$" not in text:
+        if not text:
             return []
 
         available = {
@@ -187,7 +188,45 @@ class AgentLoop:
         for m in re.finditer(r"\bskill\s+([a-z0-9][a-z0-9-]{1,63})\b", text):
             _add(m.group(1))
 
+        # Natural-language skill mentions (without "$" or explicit "skill <name>").
+        normalized_text = self._normalize_for_skill_match(text)
+        for name in sorted(available):
+            low = name.lower()
+            spaced = low.replace("-", " ")
+            compact = low.replace("-", "")
+            norm_name = self._normalize_for_skill_match(low)
+            norm_spaced = self._normalize_for_skill_match(spaced)
+            norm_compact = self._normalize_for_skill_match(compact)
+
+            if low in text or spaced in text or compact in text:
+                _add(name)
+                continue
+            if norm_name and norm_name in normalized_text:
+                _add(name)
+                continue
+            if norm_spaced and norm_spaced in normalized_text:
+                _add(name)
+                continue
+            if norm_compact and norm_compact in normalized_text:
+                _add(name)
+
+        # Common aliases / typos for existing skills.
+        if (
+            "facebook-messenger-assist" in available
+            and ("facebook" in text)
+            and any(k in text for k in ("messenger", "messager", "message"))
+        ):
+            _add("facebook-messenger-assist")
+
         return requested
+
+    @staticmethod
+    def _normalize_for_skill_match(text: str) -> str:
+        s = unicodedata.normalize("NFKD", text or "")
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = s.lower()
+        s = re.sub(r"[^a-z0-9]+", " ", s)
+        return re.sub(r"\s+", " ", s).strip()
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:

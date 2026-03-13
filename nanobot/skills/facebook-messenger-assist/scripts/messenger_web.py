@@ -197,7 +197,7 @@ def _run(args: argparse.Namespace) -> int:
 
         ctx = pw.chromium.launch_persistent_context(**launch_opts)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.goto("https://www.messenger.com/", wait_until="domcontentloaded", timeout=45000)
+        page.goto("https://www.facebook.com/messages", wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(1500)
         _ensure_logged_in(page, profile_dir)
 

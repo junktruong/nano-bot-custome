@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ def _cfg_get(d: dict[str, Any], *keys: str) -> Any:
 def _load_chatgpt_web_defaults() -> dict[str, str]:
     defaults = {
         "profile_dir": "~/.nanobot/playwright/chatgpt",
+        "profile_fallback_dir": "~/.nanobot/playwright/messenger",
         "channel": "chrome",
         "executable_path": "",
     }
@@ -58,6 +60,52 @@ def _load_chatgpt_web_defaults() -> dict[str, str]:
         defaults["executable_path"] = exe.strip()
 
     return defaults
+
+
+def _is_profile_lock_error(err: str) -> bool:
+    text = (err or "").lower()
+    return any(
+        k in text for k in (
+            "processsingleton",
+            "singletonlock",
+            "profile is already in use",
+            "already in use by another instance of chromium",
+        )
+    )
+
+
+def _seed_profile_if_needed(primary_dir: Path, fallback_dir: Path) -> str | None:
+    """Best-effort copy from primary profile to fallback profile when fallback is empty."""
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        has_files = any(fallback_dir.iterdir())
+    except Exception:
+        has_files = False
+    if has_files:
+        return None
+    if not primary_dir.exists():
+        return "primary profile missing"
+
+    ignore = shutil.ignore_patterns(
+        "Singleton*",
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        "lock",
+        "LOCK",
+        "LOCKFILE",
+        "Crashpad",
+        "Crash Reports",
+        "GPUCache",
+        "ShaderCache",
+        "Code Cache",
+        "GrShaderCache",
+    )
+    try:
+        shutil.copytree(primary_dir, fallback_dir, dirs_exist_ok=True, ignore=ignore)
+        return None
+    except Exception as e:
+        return str(e)
 
 
 def _norm(text: str) -> str:
@@ -178,14 +226,18 @@ def _run(args: argparse.Namespace) -> int:
         _jprint({"ok": False, "error": f"Playwright is required: {e}"})
         return 1
 
-    profile_dir = str(Path(args.profile_dir).expanduser())
-    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    primary_profile_dir = Path(args.profile_dir).expanduser()
+    fallback_profile_dir = Path(args.profile_fallback_dir).expanduser()
+    primary_profile_dir.mkdir(parents=True, exist_ok=True)
+    used_profile_dir = primary_profile_dir
+    fallback_used = False
+    seed_err: str | None = None
 
     pw = sync_playwright().start()
     ctx = None
     try:
         launch_opts: dict[str, Any] = {
-            "user_data_dir": profile_dir,
+            "user_data_dir": str(primary_profile_dir),
             "headless": bool(args.headless),
             "viewport": {"width": 1440, "height": 960},
             "args": ["--no-first-run", "--no-default-browser-check"],
@@ -195,16 +247,35 @@ def _run(args: argparse.Namespace) -> int:
         if args.executable_path:
             launch_opts["executable_path"] = args.executable_path
 
-        ctx = pw.chromium.launch_persistent_context(**launch_opts)
+        try:
+            ctx = pw.chromium.launch_persistent_context(**launch_opts)
+        except Exception as e:
+            if args.disable_profile_fallback or not _is_profile_lock_error(str(e)):
+                raise
+            seed_err = _seed_profile_if_needed(primary_profile_dir, fallback_profile_dir)
+            launch_opts["user_data_dir"] = str(fallback_profile_dir)
+            ctx = pw.chromium.launch_persistent_context(**launch_opts)
+            used_profile_dir = fallback_profile_dir
+            fallback_used = True
+
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto("https://www.facebook.com/messages", wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(1500)
-        _ensure_logged_in(page, profile_dir)
+        _ensure_logged_in(page, str(used_profile_dir))
 
         if args.command == "list-chats":
             threads = _collect_threads(page)
             chats = [{"name": t["name"], "href": t["href"]} for t in threads[: max(1, int(args.limit))]]
-            _jprint({"ok": True, "count": len(chats), "chats": chats})
+            payload: dict[str, Any] = {
+                "ok": True,
+                "count": len(chats),
+                "chats": chats,
+                "profile_dir": str(used_profile_dir),
+                "fallback_used": fallback_used,
+            }
+            if fallback_used and seed_err:
+                payload["fallback_seed_warning"] = seed_err
+            _jprint(payload)
             return 0
 
         threads = _collect_threads(page)
@@ -224,7 +295,16 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "read-chat":
             messages = _read_messages(page, limit=max(1, int(args.limit)))
-            _jprint({"ok": True, "chat": picked["name"], "messages": messages})
+            payload = {
+                "ok": True,
+                "chat": picked["name"],
+                "messages": messages,
+                "profile_dir": str(used_profile_dir),
+                "fallback_used": fallback_used,
+            }
+            if fallback_used and seed_err:
+                payload["fallback_seed_warning"] = seed_err
+            _jprint(payload)
             return 0
 
         if args.command == "send-message":
@@ -247,7 +327,16 @@ def _run(args: argparse.Namespace) -> int:
             page.keyboard.press("Enter")
             page.wait_for_timeout(800)
 
-            _jprint({"ok": True, "chat": picked["name"], "sent": text})
+            payload = {
+                "ok": True,
+                "chat": picked["name"],
+                "sent": text,
+                "profile_dir": str(used_profile_dir),
+                "fallback_used": fallback_used,
+            }
+            if fallback_used and seed_err:
+                payload["fallback_seed_warning"] = seed_err
+            _jprint(payload)
             return 0
 
         _jprint({"ok": False, "error": f"Unknown command: {args.command}"})
@@ -275,6 +364,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--profile-dir",
         default=defaults["profile_dir"],
         help="Playwright persistent profile dir",
+    )
+    parser.add_argument(
+        "--profile-fallback-dir",
+        default=defaults["profile_fallback_dir"],
+        help="Fallback profile dir when primary profile is locked",
+    )
+    parser.add_argument(
+        "--disable-profile-fallback",
+        action="store_true",
+        help="Disable automatic fallback to a secondary profile when primary profile is locked",
     )
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
     parser.add_argument(

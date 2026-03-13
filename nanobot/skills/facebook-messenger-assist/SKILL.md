@@ -46,4 +46,6 @@ It supports:
 
 - User must login manually once in browser profile.
 - Default profile directory follows `providers.chatgpt_web.user_data_dir` in `~/.nanobot/config.json` (usually `~/.nanobot/playwright/chatgpt`).
+- If primary profile is locked (SingletonLock), script auto-falls back to `~/.nanobot/playwright/messenger` and reports `fallback_used: true`.
+- You can force explicit fallback path with `--profile-fallback-dir`.
 - If script cannot find selectors, report exact failure and stop; do not fake a success.

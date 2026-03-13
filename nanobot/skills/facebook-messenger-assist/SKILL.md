@@ -43,5 +43,5 @@ It supports:
 ## Notes
 
 - User must login manually once in browser profile.
-- Default profile directory: `~/.nanobot/playwright/facebook`.
+- Default profile directory follows `providers.chatgpt_web.user_data_dir` in `~/.nanobot/config.json` (usually `~/.nanobot/playwright/chatgpt`).
 - If script cannot find selectors, report exact failure and stop; do not fake a success.

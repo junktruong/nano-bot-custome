@@ -109,15 +109,22 @@ def _migrate_legacy_skill_paths(skills_dir: Path) -> None:
         return
     try:
         content = skill_md.read_text(encoding="utf-8")
+        legacy = "nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py"
+        new = "skills/facebook-messenger-assist/scripts/messenger_web.py"
+        if legacy in content:
+            skill_md.write_text(content.replace(legacy, new), encoding="utf-8")
     except Exception:
-        return
+        pass
 
-    legacy = "nanobot/skills/facebook-messenger-assist/scripts/messenger_web.py"
-    new = "skills/facebook-messenger-assist/scripts/messenger_web.py"
-    if legacy not in content:
+    # Migrate old script default profile path to the shared ChatGPT web profile.
+    script = skills_dir / "facebook-messenger-assist" / "scripts" / "messenger_web.py"
+    if not script.exists():
         return
-
     try:
-        skill_md.write_text(content.replace(legacy, new), encoding="utf-8")
+        s = script.read_text(encoding="utf-8")
+        old = 'default="~/.nanobot/playwright/facebook"'
+        new = 'default="~/.nanobot/playwright/chatgpt"'
+        if old in s:
+            script.write_text(s.replace(old, new), encoding="utf-8")
     except Exception:
-        return
+        pass

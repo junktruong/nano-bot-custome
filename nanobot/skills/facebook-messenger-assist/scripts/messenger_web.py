@@ -14,6 +14,52 @@ def _jprint(data: dict[str, Any]) -> None:
     print(json.dumps(data, ensure_ascii=False))
 
 
+def _cfg_get(d: dict[str, Any], *keys: str) -> Any:
+    cur: Any = d
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        if key in cur:
+            cur = cur[key]
+            continue
+        # Support both snake_case and camelCase config keys
+        camel = "".join(part.capitalize() if i else part for i, part in enumerate(key.split("_")))
+        if camel in cur:
+            cur = cur[camel]
+            continue
+        return None
+    return cur
+
+
+def _load_chatgpt_web_defaults() -> dict[str, str]:
+    defaults = {
+        "profile_dir": "~/.nanobot/playwright/chatgpt",
+        "channel": "chrome",
+        "executable_path": "",
+    }
+    cfg_path = Path.home() / ".nanobot" / "config.json"
+    if not cfg_path.exists():
+        return defaults
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return defaults
+
+    profile = _cfg_get(data, "providers", "chatgpt_web", "user_data_dir")
+    if isinstance(profile, str) and profile.strip():
+        defaults["profile_dir"] = profile.strip()
+
+    channel = _cfg_get(data, "providers", "chatgpt_web", "browser_channel")
+    if isinstance(channel, str) and channel.strip():
+        defaults["channel"] = channel.strip()
+
+    exe = _cfg_get(data, "providers", "chatgpt_web", "executable_path")
+    if isinstance(exe, str) and exe.strip():
+        defaults["executable_path"] = exe.strip()
+
+    return defaults
+
+
 def _norm(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
 
@@ -110,12 +156,19 @@ def _find_composer(page: Any) -> Any:
     raise RuntimeError("Cannot find Messenger composer textbox")
 
 
-def _ensure_logged_in(page: Any) -> None:
+def _ensure_logged_in(page: Any, profile_dir: str) -> None:
     url = page.url.lower()
     if "login" in url:
-        raise RuntimeError("Not logged in. Login manually first in the same profile directory.")
+        raise RuntimeError(
+            f"Not logged in in profile '{profile_dir}'. "
+            "Login manually once in this profile directory."
+        )
     if page.locator('input[name="email"]').count() > 0:
-        raise RuntimeError("Login form detected. Login manually first in the same profile directory.")
+        raise RuntimeError(
+            f"Login form detected in profile '{profile_dir}'. "
+            "Use the same Playwright profile as ChatGPT Web (usually ~/.nanobot/playwright/chatgpt), "
+            "or pass --profile-dir explicitly."
+        )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -146,7 +199,7 @@ def _run(args: argparse.Namespace) -> int:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto("https://www.messenger.com/", wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(1500)
-        _ensure_logged_in(page)
+        _ensure_logged_in(page, profile_dir)
 
         if args.command == "list-chats":
             threads = _collect_threads(page)
@@ -215,15 +268,25 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    defaults = _load_chatgpt_web_defaults()
+
     parser = argparse.ArgumentParser(description="Facebook Messenger web helper")
     parser.add_argument(
         "--profile-dir",
-        default="~/.nanobot/playwright/facebook",
+        default=defaults["profile_dir"],
         help="Playwright persistent profile dir",
     )
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
-    parser.add_argument("--channel", default="chrome", help="Browser channel (default: chrome)")
-    parser.add_argument("--executable-path", default="", help="Custom browser executable")
+    parser.add_argument(
+        "--channel",
+        default=defaults["channel"],
+        help="Browser channel (default from providers.chatgpt_web.browser_channel, fallback: chrome)",
+    )
+    parser.add_argument(
+        "--executable-path",
+        default=defaults["executable_path"],
+        help="Custom browser executable (default from providers.chatgpt_web.executable_path)",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 

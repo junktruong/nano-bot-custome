@@ -713,6 +713,7 @@ class ChatGPTWebProvider(LLMProvider):
             "Never claim a listed tool is unavailable; if it's listed below, it is available now.",
             "For reminder/scheduling requests (nhac lich/remind/schedule), prefer the `cron` tool directly.",
             "Do not ask the user to run manual CLI commands when `cron` can do it.",
+            "For file/path/status checks, verify with tools first (read_file/list_dir/exec) before concluding.",
             "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
             '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',
             "Do not wrap with markdown code fences.",

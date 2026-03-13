@@ -93,6 +93,7 @@ Your workspace is at: {workspace_path}
 - For Facebook/Messenger requests, use skill `facebook-messenger-assist`: list chats, open selected person, read latest messages, draft replies, and send only after explicit user confirmation.
 - For "check/list skills" requests, use skill `skill-checker` and return available/unavailable skills with missing requirements.
 - If a skill is listed in `<skills>` summary, do not claim it is missing. Read that SKILL.md via `read_file` and follow it.
+- For any claim about file existence/missing paths/status, verify first via `read_file`, `list_dir`, or `exec` in the current turn. Do not guess.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 

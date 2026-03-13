@@ -29,6 +29,8 @@ It supports:
 
 ## Standard Workflow
 
+0. Verify script exists in current workspace:
+- `ls -l skills/facebook-messenger-assist/scripts/messenger_web.py`
 1. List first 10 chats:
 - `python3 skills/facebook-messenger-assist/scripts/messenger_web.py list-chats --limit 10`
 2. Ask user to pick one exact name from the list.

@@ -273,6 +273,17 @@ class AgentLoop:
         return any(h in low for h in hints)
 
     @staticmethod
+    def _looks_like_messenger_request(text: str) -> bool:
+        low = (text or "").lower()
+        if not low:
+            return False
+        has_platform = any(k in low for k in ("facebook", "messenger", "messager"))
+        has_message_intent = any(
+            k in low for k in ("message", "tin nhan", "tin nhắn", "inbox", "chat", "hoi thoai", "hội thoại")
+        )
+        return has_platform or (has_message_intent and ("facebook" in low or "messenger" in low))
+
+    @staticmethod
     def _looks_like_tool_unavailable_reply(text: str) -> bool:
         low = (text or "").lower()
         if not low:
@@ -319,8 +330,10 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         cron_force_retry_used = False
+        messenger_force_retry_used = False
         latest_user_text = self._latest_user_text(initial_messages)
         reminder_intent = self._looks_like_reminder_request(latest_user_text)
+        messenger_intent = self._looks_like_messenger_request(latest_user_text)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -395,6 +408,31 @@ class AgentLoop:
                             "For reminder/schedule requests, call `cron` directly and do NOT ask the user "
                             "to run manual CLI commands. "
                             "Return exactly one <tool_call> JSON for the next action."
+                        ),
+                    })
+                    continue
+
+                should_force_messenger_retry = (
+                    not messenger_force_retry_used
+                    and iteration == 1
+                    and messenger_intent
+                    and self.tools.has("exec")
+                )
+                if should_force_messenger_retry:
+                    messenger_force_retry_used = True
+                    logger.warning(
+                        "Messenger guardrail retry: forcing live tool verification before responding"
+                    )
+                    messages = self.context.add_assistant_message(
+                        messages, clean, reasoning_content=response.reasoning_content,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "System correction: For Facebook/Messenger requests, do not infer from history/log text. "
+                            "Run live tool checks now (exec/list_dir/read_file) and report only verified results. "
+                            "At minimum verify script path `skills/facebook-messenger-assist/scripts/messenger_web.py` "
+                            "and run `python3 skills/facebook-messenger-assist/scripts/messenger_web.py list-chats --limit 10`."
                         ),
                     })
                     continue

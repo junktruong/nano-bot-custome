@@ -217,6 +217,30 @@ class AgentLoop:
             and any(k in text for k in ("messenger", "messager", "message"))
         ):
             _add("facebook-messenger-assist")
+        if (
+            "vps-file-manager" in available
+            and any(k in text for k in ("vps", "server", "ubuntu", "linux"))
+            and any(
+                k in text
+                for k in (
+                    "file",
+                    "folder",
+                    "thu muc",
+                    "thư mục",
+                    "anh",
+                    "ảnh",
+                    "image",
+                    "screenshot",
+                    "chup man hinh",
+                    "chụp màn hình",
+                    "task",
+                    "tac vu",
+                    "tác vụ",
+                    "status",
+                )
+            )
+        ):
+            _add("vps-file-manager")
 
         return requested
 

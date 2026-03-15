@@ -31,3 +31,4 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `google-workspace` | Execute Docs/Sheets/Drive actions via extension workers |
 | `facebook-messenger-assist` | Assist Messenger chat workflow (list/read/draft/send with explicit approval) |
 | `skill-checker` | Check discovered skills, availability status, and missing requirements |
+| `vps-file-manager` | Manage VPS files and send screenshot-style status snapshots as images |

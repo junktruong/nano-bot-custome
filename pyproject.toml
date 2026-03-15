@@ -82,6 +82,7 @@ include = [
     "nanobot/**/*.py",
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
+    "nanobot/skills/**/*.py",
     "nanobot/skills/**/*.sh",
 ]
 

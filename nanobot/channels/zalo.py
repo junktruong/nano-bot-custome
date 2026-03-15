@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import mimetypes
+import shutil
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +56,7 @@ class ZaloChannel(BaseChannel):
         self._webhook_server: ThreadingHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._media_dir = Path.home() / ".nanobot" / "media" / "zalo"
+        self._outbound_media_dir = Path.home() / ".nanobot" / "media" / "zalo-outbound"
 
     async def start(self) -> None:
         if not self.config.token:
@@ -117,15 +119,16 @@ class ZaloChannel(BaseChannel):
 
         for media in msg.media or []:
             try:
-                if media.startswith("http://") or media.startswith("https://"):
-                    await self._call_bot_with_retry("send_photo", chat_id, "", media, attempts=3)
+                media_url = self._resolve_outbound_media_url(media)
+                if media_url:
+                    await self._call_bot_with_retry("send_photo", chat_id, "", media_url, attempts=3)
                 else:
                     filename = media.rsplit("/", 1)[-1]
                     await self._call_bot_with_retry(
                         "send_message",
                         chat_id,
                         f"[Attachment skipped: {filename}] "
-                        "Zalo channel currently supports media URLs only.",
+                        "Zalo channel needs webhook mode with a public URL to send local image files.",
                         attempts=3,
                     )
             except Exception as e:
@@ -271,6 +274,8 @@ class ZaloChannel(BaseChannel):
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlsplit(self.path)
+                if channel._serve_public_media(self, parsed.path):
+                    return
                 path = self._norm_path(parsed.path)
                 expected = self._norm_path(expected_path)
                 if path != expected:
@@ -349,6 +354,77 @@ class ZaloChannel(BaseChannel):
             self.config.webhook_port,
             expected_path,
         )
+
+    def _resolve_outbound_media_url(self, media: str) -> str | None:
+        raw = (media or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        if not self.config.webhook_url or (self.config.mode or "polling") != "webhook":
+            return None
+
+        src = Path(raw).expanduser()
+        if not src.is_file():
+            return None
+        mime, _ = mimetypes.guess_type(str(src))
+        if not mime or not mime.startswith("image/"):
+            return None
+
+        self._outbound_media_dir.mkdir(parents=True, exist_ok=True)
+        ext = src.suffix or mimetypes.guess_extension(mime) or ".jpg"
+        dest_name = f"{uuid.uuid4().hex}{ext}"
+        dest = self._outbound_media_dir / dest_name
+        shutil.copy2(src, dest)
+
+        public_root = urlsplit(self.config.webhook_url)
+        media_path = f"{self._media_route_prefix().rstrip('/')}/{dest_name}"
+        return f"{public_root.scheme}://{public_root.netloc}{media_path}"
+
+    def _media_route_prefix(self) -> str:
+        webhook_path = (self.config.webhook_path or "/zalo/webhook").strip() or "/zalo/webhook"
+        parts = [p for p in webhook_path.split("/") if p]
+        if len(parts) <= 1:
+            return "/media"
+        return "/" + "/".join(parts[:-1] + ["media"])
+
+    def _serve_public_media(self, handler: BaseHTTPRequestHandler, path: str) -> bool:
+        media_prefix = self._media_route_prefix().rstrip("/")
+        if not media_prefix:
+            media_prefix = "/media"
+        if not path.startswith(f"{media_prefix}/"):
+            return False
+
+        filename = Path(path[len(media_prefix) + 1:]).name
+        if not filename:
+            handler.send_response(404)
+            handler.end_headers()
+            handler.wfile.write(b"not found")
+            return True
+
+        target = self._outbound_media_dir / filename
+        if not target.is_file():
+            handler.send_response(404)
+            handler.end_headers()
+            handler.wfile.write(b"not found")
+            return True
+
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        try:
+            raw = target.read_bytes()
+        except Exception:
+            handler.send_response(500)
+            handler.end_headers()
+            handler.wfile.write(b"read error")
+            return True
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", ctype)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.send_header("Cache-Control", "private, max-age=300")
+        handler.end_headers()
+        handler.wfile.write(raw)
+        return True
 
     async def _consume_webhook_queue(self) -> None:
         if not self._webhook_queue:

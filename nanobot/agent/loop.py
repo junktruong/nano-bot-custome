@@ -32,7 +32,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
+    from nanobot.config.schema import ApprovalConfig, ChannelsConfig, ExecToolConfig
     from nanobot.cron.service import CronService
 
 
@@ -49,6 +49,7 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    _PENDING_APPROVAL_KEY = "pending_tool_approval"
 
     def __init__(
         self,
@@ -67,8 +68,9 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        approval_config: ApprovalConfig | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ApprovalConfig, ExecToolConfig
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
@@ -80,6 +82,7 @@ class AgentLoop:
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
+        self.approval_config = approval_config or ApprovalConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
@@ -252,6 +255,88 @@ class AgentLoop:
         s = re.sub(r"[^a-z0-9]+", " ", s)
         return re.sub(r"\s+", " ", s).strip()
 
+    def _requires_tool_approval(self, channel: str | None, tool_name: str) -> bool:
+        cfg = self.approval_config
+        if not cfg.enabled:
+            return False
+        if channel and cfg.channels:
+            allowed_channels = {item.strip().lower() for item in cfg.channels if item.strip()}
+            if allowed_channels and channel.lower() not in allowed_channels:
+                return False
+        watched_tools = {item.strip() for item in cfg.tools if item.strip()}
+        return tool_name in watched_tools
+
+    def _format_tool_approval_summary(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        if tool_name == "exec":
+            command = str(arguments.get("command", "")).strip()
+            if command:
+                compact = re.sub(r"\s+", " ", command)
+                if len(compact) > 180:
+                    compact = compact[:177] + "..."
+                return f"run shell command: {compact}"
+        if tool_name == "spawn":
+            label = str(arguments.get("label", "")).strip()
+            task = str(arguments.get("task", "")).strip()
+            detail = label or task
+            if detail:
+                detail = re.sub(r"\s+", " ", detail)
+                if len(detail) > 180:
+                    detail = detail[:177] + "..."
+                return f"spawn background task: {detail}"
+        if tool_name == "extension_job":
+            task = str(arguments.get("task", "") or arguments.get("kind", "")).strip()
+            if task:
+                task = re.sub(r"\s+", " ", task)
+                if len(task) > 180:
+                    task = task[:177] + "..."
+                return f"run extension job: {task}"
+
+        compact_args = re.sub(r"\s+", " ", json.dumps(arguments, ensure_ascii=False))
+        if len(compact_args) > 180:
+            compact_args = compact_args[:177] + "..."
+        return f"call tool `{tool_name}` with {compact_args}"
+
+    def _build_approval_prompt(self, summary: str) -> str:
+        return (
+            "Can xac nhan buoc tiep theo truoc khi bot thuc hien tren VPS.\n"
+            f"- Hanh dong: {summary}\n"
+            "Tra loi `yes` de tiep tuc hoac `no` de huy."
+        )
+
+    def _get_pending_approval(self, session: Session) -> dict[str, Any] | None:
+        value = session.metadata.get(self._PENDING_APPROVAL_KEY)
+        return value if isinstance(value, dict) else None
+
+    def _set_pending_approval(self, session: Session, payload: dict[str, Any]) -> None:
+        session.metadata[self._PENDING_APPROVAL_KEY] = payload
+
+    def _clear_pending_approval(self, session: Session) -> None:
+        session.metadata.pop(self._PENDING_APPROVAL_KEY, None)
+
+    def _approval_decision(self, text: str) -> str | None:
+        normalized = self._normalize_for_skill_match(text)
+        if not normalized:
+            return None
+
+        reject_phrases = {
+            "n", "no", "cancel", "stop", "dung", "khong", "huy", "bo qua",
+            "khong dong y", "khong xac nhan", "khong tiep tuc",
+        }
+        approve_phrases = {
+            "y", "yes", "ok", "oke", "okela", "dong y", "xac nhan", "chap nhan",
+            "tiep tuc", "run", "deploy", "thuc hien", "cho phep",
+        }
+
+        if normalized in reject_phrases or any(
+            normalized.startswith(f"{phrase} ") for phrase in reject_phrases
+        ):
+            return "reject"
+        if normalized in approve_phrases or any(
+            normalized.startswith(f"{phrase} ") for phrase in approve_phrases
+        ):
+            return "approve"
+        return None
+
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -347,12 +432,14 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        approval_channel: str | None = None,
+    ) -> tuple[str | None, list[str], list[dict], dict[str, Any] | None]:
+        """Run the agent iteration loop."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        approval_request: dict[str, Any] | None = None
         cron_force_retry_used = False
         messenger_force_retry_used = False
         latest_user_text = self._latest_user_text(initial_messages)
@@ -377,23 +464,34 @@ class AgentLoop:
                         await on_progress(clean)
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
+                for idx, tool_call in enumerate(response.tool_calls):
+                    if self._requires_tool_approval(approval_channel, tool_call.name):
+                        summary = self._format_tool_approval_summary(tool_call.name, tool_call.arguments)
+                        prompt = self._build_approval_prompt(summary)
+                        messages = self.context.add_assistant_message(messages, prompt)
+                        approval_request = {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                            "summary": summary,
+                            "prompt": prompt,
+                        }
+                        return prompt, tools_used, messages, approval_request
+
+                    tool_call_dict = {
+                        "id": tool_call.id,
                         "type": "function",
                         "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False)
-                        }
+                            "name": tool_call.name,
+                            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                        },
                     }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
-                )
-
-                for tool_call in response.tool_calls:
+                    messages = self.context.add_assistant_message(
+                        messages,
+                        response.content if idx == 0 else None,
+                        [tool_call_dict],
+                        reasoning_content=response.reasoning_content if idx == 0 else None,
+                    )
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
@@ -474,7 +572,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, approval_request
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -523,6 +621,10 @@ class AgentLoop:
         sub_cancelled = 0
         for key in matched_keys or [msg.session_key]:
             sub_cancelled += await self.subagents.cancel_by_session(key)
+            session = self.sessions.get_or_create(key)
+            if self._get_pending_approval(session):
+                self._clear_pending_approval(session)
+                self.sessions.save(session)
         total = cancelled + sub_cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(OutboundMessage(
@@ -579,6 +681,88 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    async def _resume_pending_approval(
+        self,
+        session: Session,
+        msg: InboundMessage,
+        pending: dict[str, Any],
+        on_progress: Callable[[str], Awaitable[None]] | None,
+        history: list[dict[str, Any]],
+    ) -> OutboundMessage | None:
+        summary = str(pending.get("summary", "")).strip() or "approved pending action"
+        tool_name = str(pending.get("tool_name", "")).strip()
+        arguments = pending.get("arguments")
+        requested_skills = pending.get("requested_skills")
+        if not tool_name or not isinstance(arguments, dict):
+            self._clear_pending_approval(session)
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Pending approval data was invalid, so I cleared it. Please send the task again.",
+                metadata=msg.metadata or {},
+            )
+
+        if on_progress:
+            await on_progress(f"Da duoc xac nhan, dang thuc hien: {summary}")
+
+        initial_messages = self.context.build_messages(
+            history=history,
+            current_message=msg.content,
+            skill_names=requested_skills if isinstance(requested_skills, list) else None,
+            media=msg.media if msg.media else None,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+        )
+        tool_call_id = str(pending.get("tool_call_id") or f"approved_{tool_name}")
+        tool_call_dict = {
+            "id": tool_call_id,
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+            },
+        }
+        messages = self.context.add_assistant_message(
+            initial_messages,
+            f"Approved step: {summary}",
+            [tool_call_dict],
+        )
+        result = await self.tools.execute(tool_name, arguments)
+        messages = self.context.add_tool_result(messages, tool_call_id, tool_name, result)
+
+        self._clear_pending_approval(session)
+        final_content, _, all_msgs, next_approval = await self._run_agent_loop(
+            messages,
+            on_progress=on_progress,
+            approval_channel=msg.channel,
+        )
+
+        if final_content is None:
+            final_content = "I've completed processing but have no response to give."
+
+        self._save_turn(session, all_msgs, 1 + len(history))
+        if next_approval:
+            self._set_pending_approval(session, next_approval)
+        self.sessions.save(session)
+
+        if (
+            (mt := self.tools.get("message"))
+            and isinstance(mt, MessageTool)
+            and mt._sent_in_turn
+            and not next_approval
+        ):
+            return None
+
+        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=final_content,
+            metadata=msg.metadata or {},
+        )
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -600,8 +784,14 @@ class AgentLoop:
                 history=history, current_message=msg.content, skill_names=requested_skills,
                 channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, approval_request = await self._run_agent_loop(
+                messages,
+                approval_channel=channel,
+            )
             self._save_turn(session, all_msgs, 1 + len(history))
+            if approval_request:
+                approval_request["requested_skills"] = requested_skills
+                self._set_pending_approval(session, approval_request)
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -638,6 +828,7 @@ class AgentLoop:
                 self._consolidating.discard(session.key)
 
             session.clear()
+            self._clear_pending_approval(session)
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
@@ -669,7 +860,50 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_progress"] = True
+            meta["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+            ))
+
+        progress_cb = on_progress or _bus_progress
         history = session.get_history(max_messages=self.memory_window)
+        if pending := self._get_pending_approval(session):
+            decision = self._approval_decision(msg.content)
+            if decision == "approve":
+                return await self._resume_pending_approval(
+                    session=session,
+                    msg=msg,
+                    pending=pending,
+                    on_progress=progress_cb,
+                    history=history,
+                )
+            if decision == "reject":
+                self._clear_pending_approval(session)
+                session.add_message("user", msg.content)
+                session.add_message(
+                    "assistant",
+                    f"Da huy buoc dang cho duyet: {pending.get('summary', 'pending action')}.",
+                )
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Da huy buoc dang cho duyet: {pending.get('summary', 'pending action')}.",
+                    metadata=msg.metadata or {},
+                )
+            prompt = str(pending.get("prompt") or self._build_approval_prompt(
+                str(pending.get("summary", "pending action"))
+            ))
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=prompt,
+                metadata=msg.metadata or {},
+            )
+
         requested_skills = self._extract_requested_skills(msg.content)
         if requested_skills:
             logger.info("Explicit skill request detected: {}", ", ".join(requested_skills))
@@ -681,25 +915,28 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-            meta = dict(msg.metadata or {})
-            meta["_progress"] = True
-            meta["_tool_hint"] = tool_hint
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
-            ))
-
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+        final_content, _, all_msgs, approval_request = await self._run_agent_loop(
+            initial_messages,
+            on_progress=progress_cb,
+            approval_channel=msg.channel,
         )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
+        if approval_request:
+            if requested_skills:
+                approval_request["requested_skills"] = requested_skills
+            self._set_pending_approval(session, approval_request)
         self.sessions.save(session)
 
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        if (
+            (mt := self.tools.get("message"))
+            and isinstance(mt, MessageTool)
+            and mt._sent_in_turn
+            and not approval_request
+        ):
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content

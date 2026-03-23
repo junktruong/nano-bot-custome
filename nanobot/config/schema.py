@@ -327,6 +327,14 @@ class ExecToolConfig(Base):
     path_append: str = ""
 
 
+class ApprovalConfig(Base):
+    """Human approval workflow for risky tool actions."""
+
+    enabled: bool = False
+    channels: list[str] = Field(default_factory=lambda: ["zalo"])
+    tools: list[str] = Field(default_factory=lambda: ["exec", "spawn", "extension_job"])
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -343,6 +351,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

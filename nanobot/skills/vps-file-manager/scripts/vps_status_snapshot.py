@@ -8,6 +8,7 @@ import asyncio
 import html
 import json
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -275,9 +276,111 @@ def _build_html(title: str, host: str, generated_at: str, panels: list[dict[str,
 """
 
 
-async def _render_png(
-    html_path: Path,
-    image_path: Path,
+def _build_panel_html(title: str, host: str, generated_at: str, panel: dict[str, str]) -> str:
+    system_line = html.escape(platform.platform())
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)} - {html.escape(panel["title"])}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #141c33;
+      --panel-2: #1b2646;
+      --text: #ecf2ff;
+      --muted: #9ab0d8;
+      --line: #2d3b67;
+      --accent: #76e4c3;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      padding: 24px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background:
+        radial-gradient(circle at top left, rgba(118,228,195,0.16), transparent 28%),
+        linear-gradient(135deg, #0b1020 0%, #0f1630 45%, #111a38 100%);
+      color: var(--text);
+    }}
+    .frame {{
+      width: 1240px;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      overflow: hidden;
+      background: rgba(8, 13, 27, 0.9);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+    }}
+    header {{
+      padding: 22px 26px 16px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(118,228,195,0.08), rgba(255,255,255,0));
+    }}
+    h1 {{
+      margin: 0 0 10px;
+      font-size: 28px;
+      line-height: 1.2;
+    }}
+    .meta {{
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    .meta strong {{
+      color: var(--accent);
+      font-weight: 700;
+    }}
+    .card {{
+      margin: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      overflow: hidden;
+    }}
+    .card h2 {{
+      margin: 0;
+      padding: 14px 16px;
+      font-size: 20px;
+      border-bottom: 1px solid var(--line);
+      color: var(--accent);
+    }}
+    pre {{
+      margin: 0;
+      padding: 16px 18px 20px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+      font-size: 18px;
+      color: var(--text);
+    }}
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <header>
+      <h1>{html.escape(title)}</h1>
+      <div class="meta">
+        <div><strong>Host</strong> {html.escape(host)}</div>
+        <div><strong>Generated</strong> {html.escape(generated_at)}</div>
+        <div><strong>Platform</strong> {system_line}</div>
+      </div>
+    </header>
+    <section class="card">
+      <h2>{html.escape(panel["title"])}</h2>
+      <pre>{html.escape(panel["body"])}</pre>
+    </section>
+  </div>
+</body>
+</html>
+"""
+
+
+async def _render_pngs(
+    jobs: list[tuple[Path, Path, dict[str, int]]],
     browser_channel: str,
     executable_path: str,
 ) -> None:
@@ -294,9 +397,13 @@ async def _render_png(
 
         browser = await pw.chromium.launch(**launch_opts)
         try:
-            page = await browser.new_page(viewport={"width": 1660, "height": 1800}, device_scale_factor=1)
-            await page.goto(html_path.as_uri(), wait_until="networkidle")
-            await page.screenshot(path=str(image_path), full_page=True)
+            for html_path, image_path, viewport in jobs:
+                page = await browser.new_page(viewport=viewport, device_scale_factor=1)
+                try:
+                    await page.goto(html_path.as_uri(), wait_until="networkidle")
+                    await page.screenshot(path=str(image_path), full_page=True)
+                finally:
+                    await page.close()
         finally:
             await browser.close()
 
@@ -306,6 +413,11 @@ def _default_output_path() -> Path:
     return Path.home() / ".nanobot" / "media" / "snapshots" / f"vps-status-{stamp}.png"
 
 
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "panel"
+
+
 def main() -> int:
     defaults = _load_browser_defaults()
 
@@ -313,6 +425,12 @@ def main() -> int:
     parser.add_argument("--output", default=str(_default_output_path()), help="Output PNG path")
     parser.add_argument("--title", default="VPS Status Snapshot", help="Dashboard title")
     parser.add_argument("--json", action="store_true", help="Print JSON result")
+    parser.add_argument(
+        "--layout",
+        choices=("dashboard", "panels", "both"),
+        default="dashboard",
+        help="Render one dashboard image, one image per panel, or both",
+    )
     parser.add_argument(
         "--browser-channel",
         default=defaults["channel"],
@@ -328,18 +446,40 @@ def main() -> int:
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     html_path = output_path.with_suffix(".html")
+    panel_dir = output_path.with_suffix("")
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     host = platform.node() or "unknown-host"
     panels = _build_panels()
-    html_text = _build_html(args.title, host, generated_at, panels)
-    html_path.write_text(html_text, encoding="utf-8")
+    jobs: list[tuple[Path, Path, dict[str, int]]] = []
+    panel_assets: list[dict[str, str]] = []
+
+    if args.layout in {"dashboard", "both"}:
+        html_text = _build_html(args.title, host, generated_at, panels)
+        html_path.write_text(html_text, encoding="utf-8")
+        jobs.append((html_path, output_path, {"width": 1660, "height": 1800}))
+
+    if args.layout in {"panels", "both"}:
+        panel_dir.mkdir(parents=True, exist_ok=True)
+        for panel in panels:
+            slug = _slugify(panel["title"])
+            panel_html_path = panel_dir / f"{slug}.html"
+            panel_image_path = panel_dir / f"{slug}.png"
+            panel_html_path.write_text(
+                _build_panel_html(args.title, host, generated_at, panel),
+                encoding="utf-8",
+            )
+            panel_assets.append({
+                "title": panel["title"],
+                "image_path": str(panel_image_path),
+                "html_path": str(panel_html_path),
+            })
+            jobs.append((panel_html_path, panel_image_path, {"width": 1280, "height": 960}))
 
     try:
         asyncio.run(
-            _render_png(
-                html_path=html_path,
-                image_path=output_path,
+            _render_pngs(
+                jobs=jobs,
                 browser_channel=args.browser_channel,
                 executable_path=args.executable_path,
             )
@@ -348,23 +488,29 @@ def main() -> int:
         payload = {
             "ok": False,
             "error": str(exc),
-            "html_path": str(html_path),
+            "html_path": str(html_path) if html_path.exists() else "",
+            "panel_images": panel_assets,
         }
         print(json.dumps(payload, ensure_ascii=False))
         return 1
 
     payload = {
         "ok": True,
-        "image_path": str(output_path),
-        "html_path": str(html_path),
+        "image_path": str(output_path) if args.layout in {"dashboard", "both"} else "",
+        "html_path": str(html_path) if args.layout in {"dashboard", "both"} else "",
         "host": host,
         "generated_at": generated_at,
         "panel_titles": [panel["title"] for panel in panels],
+        "panel_images": panel_assets,
+        "layout": args.layout,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:
-        print(f"image_path={output_path}")
+        if args.layout in {"dashboard", "both"}:
+            print(f"image_path={output_path}")
+        if panel_assets:
+            print(f"panel_count={len(panel_assets)}")
     return 0
 
 

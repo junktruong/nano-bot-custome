@@ -123,6 +123,11 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
             path_append=self.exec_config.path_append,
+            ssh_target=self.exec_config.ssh_target,
+            ssh_port=self.exec_config.ssh_port,
+            ssh_identity_file=self.exec_config.ssh_identity_file,
+            ssh_options=self.exec_config.ssh_options,
+            remote_working_dir=self.exec_config.remote_working_dir or None,
         ))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
@@ -413,6 +418,78 @@ class AgentLoop:
         return has_platform or (has_message_intent and ("facebook" in low or "messenger" in low))
 
     @staticmethod
+    def _looks_like_live_system_request(text: str) -> bool:
+        low = (text or "").lower()
+        if not low:
+            return False
+
+        subject_hints = (
+            "vps",
+            "server",
+            "ubuntu",
+            "linux",
+            "deploy",
+            "terminal",
+            "shell",
+            "tty",
+            "console",
+            "process",
+            "task",
+            "service",
+            "port",
+            "log",
+            "pm2",
+            "nginx",
+            "docker",
+            "systemctl",
+            "journalctl",
+            "snapshot",
+            "status",
+            ".py",
+            ".log",
+        )
+        action_hints = (
+            "check",
+            "kiem tra",
+            "kiểm tra",
+            "xem",
+            "verify",
+            "debug",
+            "status",
+            "trang thai",
+            "trạng thái",
+            "running",
+            "dang chay",
+            "đang chạy",
+            "tail",
+            "cat",
+            "grep",
+            "find",
+            "list",
+            "liet ke",
+            "liệt kê",
+            "open",
+            "mo",
+            "mở",
+            "run",
+            "chay",
+            "chạy",
+            "deploy",
+            "restart",
+            "stop",
+            "start",
+            "error",
+            "loi",
+            "lỗi",
+            "screenshot",
+            "anh",
+            "ảnh",
+            "chup man hinh",
+            "chụp màn hình",
+        )
+        return any(h in low for h in subject_hints) and any(h in low for h in action_hints)
+
+    @staticmethod
     def _looks_like_tool_unavailable_reply(text: str) -> bool:
         low = (text or "").lower()
         if not low:
@@ -453,6 +530,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         approval_channel: str | None = None,
+        requested_skills: list[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict[str, Any] | None]:
         """Run the agent iteration loop."""
         messages = initial_messages
@@ -462,9 +540,21 @@ class AgentLoop:
         approval_request: dict[str, Any] | None = None
         cron_force_retry_used = False
         messenger_force_retry_used = False
+        live_ops_force_retry_used = False
         latest_user_text = self._latest_user_text(initial_messages)
         reminder_intent = self._looks_like_reminder_request(latest_user_text)
         messenger_intent = self._looks_like_messenger_request(latest_user_text)
+        live_ops_skill_requested = bool(
+            {"terminal-operator", "vps-file-manager"} & set(requested_skills or [])
+        )
+        has_live_tool_result = any(
+            msg.get("role") == "tool" and msg.get("name") in {"exec", "read_file", "list_dir"}
+            for msg in initial_messages
+            if isinstance(msg, dict)
+        )
+        live_system_intent = live_ops_skill_requested or self._looks_like_live_system_request(
+            latest_user_text
+        )
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -575,6 +665,34 @@ class AgentLoop:
                             "Run live tool checks now (exec/list_dir/read_file) and report only verified results. "
                             "At minimum verify script path `skills/facebook-messenger-assist/scripts/messenger_web.py` "
                             "and run `python3 skills/facebook-messenger-assist/scripts/messenger_web.py list-chats --limit 10`."
+                        ),
+                    })
+                    continue
+
+                should_force_live_ops_retry = (
+                    not live_ops_force_retry_used
+                    and iteration == 1
+                    and live_system_intent
+                    and not has_live_tool_result
+                    and self.tools.has("exec")
+                )
+                if should_force_live_ops_retry:
+                    live_ops_force_retry_used = True
+                    logger.warning(
+                        "Live-ops guardrail retry: forcing exec/list_dir/read_file verification before responding"
+                    )
+                    messages = self.context.add_assistant_message(
+                        messages, clean, reasoning_content=response.reasoning_content,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "System correction: For VPS/server/deploy/terminal/log/process/path/status requests, "
+                            "do not answer from general knowledge, ChatGPT web browsing, chat memory, or runtime "
+                            "metadata. Treat ChatGPT Web like a plain tool-calling API model. "
+                            "Verify the live environment now with exec/list_dir/read_file before replying. "
+                            "If exec is configured to use SSH, that is the target VPS. "
+                            "Return exactly one <tool_call> JSON for the next action."
                         ),
                     })
                     continue
@@ -756,6 +874,7 @@ class AgentLoop:
             messages,
             on_progress=on_progress,
             approval_channel=msg.channel,
+            requested_skills=requested_skills if isinstance(requested_skills, list) else None,
         )
 
         if final_content is None:
@@ -939,6 +1058,7 @@ class AgentLoop:
             initial_messages,
             on_progress=progress_cb,
             approval_channel=msg.channel,
+            requested_skills=requested_skills,
         )
 
         if final_content is None:

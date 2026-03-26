@@ -16,6 +16,7 @@ Use this skill when the user asks to:
 ## Core Rules
 
 - Prefer `exec` for quick, non-interactive commands.
+- If `tools.exec.ssh_target` is configured, treat `exec` as the remote VPS shell; otherwise it runs on the machine hosting nanobot.
 - Use short, verifiable commands first: `pwd`, `ls`, `rg`, `ps`, `df`, `du`, `tail`, `ss`, `lsof`.
 - If approval gating is enabled, keep commands granular so the user can confirm each risky step.
 - For destructive or state-changing commands, summarize the exact command before running it.

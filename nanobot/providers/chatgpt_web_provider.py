@@ -711,9 +711,12 @@ class ChatGPTWebProvider(LLMProvider):
             "Do not call the 'message' tool for normal replies to the current user.",
             "Use 'message' tool only when explicitly asked to send to a different channel/chat.",
             "Never claim a listed tool is unavailable; if it's listed below, it is available now.",
+            "Treat ChatGPT Web like a plain tool-calling API model, not like an autonomous browser session.",
             "For reminder/scheduling requests (nhac lich/remind/schedule), prefer the `cron` tool directly.",
             "Do not ask the user to run manual CLI commands when `cron` can do it.",
             "For file/path/status checks, verify with tools first (read_file/list_dir/exec) before concluding.",
+            "For VPS/server/deploy/process/log/terminal/path requests, do not rely on chatgpt.com memory, browsing, or generic knowledge.",
+            "Use `exec`/`list_dir`/`read_file` to inspect the live environment before answering those requests.",
             "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
             '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',
             "Do not wrap with markdown code fences.",
@@ -820,6 +823,15 @@ class ChatGPTWebProvider(LLMProvider):
         clean_text = clean.strip()
         if content_from_message_tool and not clean_text:
             clean_text = content_from_message_tool
+        if not filtered_calls and not clean_text:
+            fallback_text = self._strip_tool_markup_keep_payload(text)
+            if fallback_text:
+                preview = re.sub(r"\s+", " ", fallback_text)[:200]
+                logger.warning(
+                    "ChatGPT Web returned tool-like output without a usable tool call; keeping payload as plain text: {}",
+                    preview,
+                )
+                clean_text = fallback_text
         return filtered_calls, clean_text
 
     @staticmethod
@@ -923,6 +935,15 @@ class ChatGPTWebProvider(LLMProvider):
                 continue
             out.append((name.strip(), args))
         return out
+
+    @staticmethod
+    def _strip_tool_markup_keep_payload(text: str) -> str:
+        stripped = (text or "").strip()
+        if not stripped:
+            return ""
+        stripped = re.sub(r"</?tool_call>\s*", "", stripped, flags=re.I)
+        stripped = re.sub(r"</?tool_calls>\s*", "", stripped, flags=re.I)
+        return stripped.strip()
 
     @staticmethod
     def _extract_session_key(messages: list[dict[str, Any]]) -> str:

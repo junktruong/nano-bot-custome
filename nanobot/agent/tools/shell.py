@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
         path_append: str = "",
+        ssh_target: str = "",
+        ssh_port: int = 22,
+        ssh_identity_file: str = "",
+        ssh_options: list[str] | None = None,
+        remote_working_dir: str | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -37,6 +43,11 @@ class ExecTool(Tool):
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
+        self.ssh_target = (ssh_target or "").strip()
+        self.ssh_port = int(ssh_port or 22)
+        self.ssh_identity_file = (ssh_identity_file or "").strip()
+        self.ssh_options = list(ssh_options or [])
+        self.remote_working_dir = (remote_working_dir or "").strip() or None
     
     @property
     def name(self) -> str:
@@ -44,6 +55,11 @@ class ExecTool(Tool):
     
     @property
     def description(self) -> str:
+        if self.ssh_target:
+            return (
+                "Execute a shell command on the configured remote host over SSH and return its output. "
+                "Use with caution."
+            )
         return "Execute a shell command and return its output. Use with caution."
     
     @property
@@ -64,7 +80,12 @@ class ExecTool(Tool):
         }
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
-        cwd = working_dir or self.working_dir or os.getcwd()
+        cwd = (
+            working_dir
+            or (self.remote_working_dir if self.ssh_target else None)
+            or (None if self.ssh_target else self.working_dir)
+            or os.getcwd()
+        )
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
@@ -74,13 +95,39 @@ class ExecTool(Tool):
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
+            if self.ssh_target:
+                remote_command = command
+                if cwd:
+                    remote_command = f"cd {shlex.quote(cwd)} && {remote_command}"
+                if self.path_append:
+                    remote_command = (
+                        f'export PATH="$PATH:{self.path_append}"; {remote_command}'
+                    )
+
+                ssh_cmd = ["ssh"]
+                if self.ssh_port:
+                    ssh_cmd.extend(["-p", str(self.ssh_port)])
+                if self.ssh_identity_file:
+                    ssh_cmd.extend(["-i", os.path.expanduser(self.ssh_identity_file)])
+                for option in self.ssh_options:
+                    opt = str(option).strip()
+                    if opt:
+                        ssh_cmd.extend(["-o", opt])
+                ssh_cmd.extend([self.ssh_target, "bash", "-lc", remote_command])
+                process = await asyncio.create_subprocess_exec(
+                    *ssh_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
             
             try:
                 stdout, stderr = await asyncio.wait_for(

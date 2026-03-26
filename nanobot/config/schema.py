@@ -325,6 +325,11 @@ class ExecToolConfig(Base):
 
     timeout: int = 60
     path_append: str = ""
+    ssh_target: str = ""
+    ssh_port: int = 22
+    ssh_identity_file: str = ""
+    ssh_options: list[str] = Field(default_factory=list)
+    remote_working_dir: str = ""
 
 
 class ApprovalConfig(Base):

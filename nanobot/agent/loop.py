@@ -244,6 +244,26 @@ class AgentLoop:
             )
         ):
             _add("vps-file-manager")
+        if (
+            "terminal-operator" in available
+            and any(
+                k in text
+                for k in (
+                    "terminal",
+                    "shell",
+                    "tty",
+                    "console",
+                    "command",
+                    "cmd",
+                    "bash",
+                    "zsh",
+                    "sh ",
+                    "lenh",
+                    "lệnh",
+                )
+            )
+        ):
+            _add("terminal-operator")
 
         return requested
 

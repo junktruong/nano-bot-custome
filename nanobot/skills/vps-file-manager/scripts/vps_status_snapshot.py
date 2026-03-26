@@ -7,10 +7,12 @@ import argparse
 import asyncio
 import html
 import json
+import os
 import platform
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -410,12 +412,242 @@ async def _render_pngs(
 
 def _default_output_path() -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path.home() / ".nanobot" / "media" / "snapshots" / f"vps-status-{stamp}.png"
+    return _pick_snapshot_dir() / f"vps-status-{stamp}.png"
 
 
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug or "panel"
+
+
+def _pick_snapshot_dir() -> Path:
+    candidates: list[Path] = []
+    if raw := os.environ.get("NANOBOT_SNAPSHOT_DIR"):
+        candidates.append(Path(raw).expanduser())
+    candidates.append(Path.home() / ".nanobot" / "media" / "snapshots")
+    candidates.append(Path(tempfile.gettempdir()) / "nanobot" / "media" / "snapshots")
+    candidates.append(Path.cwd() / ".nanobot-snapshots")
+
+    for base in candidates:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / ".write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return base
+        except Exception:
+            continue
+    return Path.cwd()
+
+
+def _load_pillow_font(size: int):
+    from PIL import ImageFont
+
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+        "/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Supplemental/Menlo.ttc",
+        "/System/Library/Fonts/SFNSMono.ttf",
+    ]
+    for candidate in font_candidates:
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        try:
+            return ImageFont.truetype(str(path), size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _text_size(draw: Any, text: str, font: Any, spacing: int = 4) -> tuple[int, int]:
+    sample = text or " "
+    bbox = draw.multiline_textbbox((0, 0), sample, font=font, spacing=spacing)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _render_dashboard_with_pillow(
+    image_path: Path,
+    title: str,
+    host: str,
+    generated_at: str,
+    panels: list[dict[str, str]],
+) -> None:
+    from PIL import Image, ImageDraw
+
+    width = 1600
+    outer_pad = 28
+    inner_gap = 18
+    header_gap = 14
+    text_spacing = 5
+    bg = "#0b1020"
+    frame_bg = "#10182f"
+    panel_bg = "#17213d"
+    line = "#2d3b67"
+    text = "#ecf2ff"
+    muted = "#9ab0d8"
+    accent = "#76e4c3"
+
+    title_font = _load_pillow_font(28)
+    meta_font = _load_pillow_font(16)
+    card_title_font = _load_pillow_font(20)
+    body_font = _load_pillow_font(16)
+
+    dummy = Image.new("RGB", (width, 10), bg)
+    dummy_draw = ImageDraw.Draw(dummy)
+    _, title_h = _text_size(dummy_draw, title, title_font)
+    meta_lines = [
+        f"Host: {host}",
+        f"Generated: {generated_at}",
+        f"Platform: {platform.platform()}",
+    ]
+    _, meta_h = _text_size(dummy_draw, "\n".join(meta_lines), meta_font, spacing=text_spacing)
+    header_h = 28 + title_h + header_gap + meta_h + 24
+
+    card_width = (width - outer_pad * 2 - inner_gap) // 2
+    body_heights: list[int] = []
+    card_heights: list[int] = []
+    for panel in panels:
+        _, card_title_h = _text_size(dummy_draw, panel["title"], card_title_font)
+        _, body_h = _text_size(dummy_draw, panel["body"], body_font, spacing=text_spacing)
+        body_heights.append(body_h)
+        card_heights.append(22 + card_title_h + 18 + body_h + 24)
+
+    row_heights: list[int] = []
+    for i in range(0, len(card_heights), 2):
+        row_heights.append(max(card_heights[i:i + 2]))
+    content_h = sum(row_heights) + inner_gap * max(0, len(row_heights) - 1)
+    height = outer_pad + header_h + 18 + content_h + outer_pad
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((16, 16, width - 16, height - 16), radius=18, fill=frame_bg, outline=line, width=2)
+
+    header_y = outer_pad + 6
+    draw.text((outer_pad + 12, header_y), title, font=title_font, fill=text)
+    meta_y = header_y + title_h + header_gap
+    draw.multiline_text((outer_pad + 12, meta_y), "\n".join(meta_lines), font=meta_font, fill=muted, spacing=text_spacing)
+
+    y = outer_pad + header_h + 18
+    for row_index in range(0, len(panels), 2):
+        row_height = row_heights[row_index // 2]
+        row = panels[row_index:row_index + 2]
+        for col_index, panel in enumerate(row):
+            x = outer_pad + col_index * (card_width + inner_gap)
+            draw.rounded_rectangle(
+                (x, y, x + card_width, y + row_height),
+                radius=16,
+                fill=panel_bg,
+                outline=line,
+                width=2,
+            )
+            draw.text((x + 18, y + 16), panel["title"], font=card_title_font, fill=accent)
+            draw.multiline_text(
+                (x + 18, y + 52),
+                panel["body"],
+                font=body_font,
+                fill=text,
+                spacing=text_spacing,
+            )
+        y += row_height + inner_gap
+
+    image.save(image_path)
+
+
+def _render_panel_with_pillow(
+    image_path: Path,
+    title: str,
+    host: str,
+    generated_at: str,
+    panel: dict[str, str],
+) -> None:
+    from PIL import Image, ImageDraw
+
+    width = 1280
+    outer_pad = 28
+    text_spacing = 6
+    bg = "#0b1020"
+    frame_bg = "#10182f"
+    panel_bg = "#17213d"
+    line = "#2d3b67"
+    text = "#ecf2ff"
+    muted = "#9ab0d8"
+    accent = "#76e4c3"
+
+    title_font = _load_pillow_font(28)
+    meta_font = _load_pillow_font(16)
+    card_title_font = _load_pillow_font(22)
+    body_font = _load_pillow_font(18)
+
+    dummy = Image.new("RGB", (width, 10), bg)
+    dummy_draw = ImageDraw.Draw(dummy)
+    _, title_h = _text_size(dummy_draw, title, title_font)
+    meta_lines = [
+        f"Host: {host}",
+        f"Generated: {generated_at}",
+        f"Platform: {platform.platform()}",
+    ]
+    _, meta_h = _text_size(dummy_draw, "\n".join(meta_lines), meta_font, spacing=text_spacing)
+    _, body_h = _text_size(dummy_draw, panel["body"], body_font, spacing=text_spacing)
+    height = outer_pad * 2 + title_h + meta_h + body_h + 128
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((16, 16, width - 16, height - 16), radius=18, fill=frame_bg, outline=line, width=2)
+    draw.text((outer_pad + 10, outer_pad), title, font=title_font, fill=text)
+    draw.multiline_text(
+        (outer_pad + 10, outer_pad + title_h + 14),
+        "\n".join(meta_lines),
+        font=meta_font,
+        fill=muted,
+        spacing=text_spacing,
+    )
+
+    card_top = outer_pad + title_h + meta_h + 38
+    draw.rounded_rectangle(
+        (outer_pad, card_top, width - outer_pad, height - outer_pad),
+        radius=16,
+        fill=panel_bg,
+        outline=line,
+        width=2,
+    )
+    draw.text((outer_pad + 18, card_top + 16), panel["title"], font=card_title_font, fill=accent)
+    draw.multiline_text(
+        (outer_pad + 18, card_top + 58),
+        panel["body"],
+        font=body_font,
+        fill=text,
+        spacing=text_spacing,
+    )
+    image.save(image_path)
+
+
+def _render_with_pillow(
+    output_path: Path,
+    panel_dir: Path,
+    title: str,
+    host: str,
+    generated_at: str,
+    panels: list[dict[str, str]],
+    layout: str,
+) -> None:
+    try:
+        import PIL  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "No PNG renderer available. Install playwright+browser or pillow."
+        ) from exc
+
+    if layout in {"dashboard", "both"}:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _render_dashboard_with_pillow(output_path, title, host, generated_at, panels)
+    if layout in {"panels", "both"}:
+        panel_dir.mkdir(parents=True, exist_ok=True)
+        for panel in panels:
+            slug = _slugify(panel["title"])
+            panel_image_path = panel_dir / f"{slug}.png"
+            _render_panel_with_pillow(panel_image_path, title, host, generated_at, panel)
 
 
 def main() -> int:
@@ -444,7 +676,12 @@ def main() -> int:
     args = parser.parse_args()
 
     output_path = Path(args.output).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        fallback_output = (_pick_snapshot_dir() / output_path.name).resolve()
+        output_path = fallback_output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     html_path = output_path.with_suffix(".html")
     panel_dir = output_path.with_suffix("")
 
@@ -476,6 +713,8 @@ def main() -> int:
             })
             jobs.append((panel_html_path, panel_image_path, {"width": 1280, "height": 960}))
 
+    renderer = "playwright"
+    renderer_error = ""
     try:
         asyncio.run(
             _render_pngs(
@@ -485,17 +724,46 @@ def main() -> int:
             )
         )
     except Exception as exc:
-        payload = {
-            "ok": False,
-            "error": str(exc),
-            "html_path": str(html_path) if html_path.exists() else "",
-            "panel_images": panel_assets,
-        }
-        print(json.dumps(payload, ensure_ascii=False))
-        return 1
+        renderer = "pillow"
+        renderer_error = str(exc)
+        try:
+            _render_with_pillow(
+                output_path=output_path,
+                panel_dir=panel_dir,
+                title=args.title,
+                host=host,
+                generated_at=generated_at,
+                panels=panels,
+                layout=args.layout,
+            )
+        except Exception as pillow_exc:
+            combined = f"{renderer_error}; pillow fallback failed: {pillow_exc}"
+            fix_hint = (
+                "Install playwright with a browser, or install pillow for headless PNG rendering."
+            )
+            payload = {
+                "ok": False,
+                "error": combined,
+                "fix_hint": fix_hint,
+                "html_path": str(html_path) if html_path.exists() else "",
+                "panel_images": panel_assets,
+                "layout": args.layout,
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+            return 1
 
-    payload = {
-        "ok": True,
+    if renderer_error and renderer == "pillow":
+        payload = {
+            "ok": True,
+            "warning": renderer_error,
+            "renderer": renderer,
+        }
+    else:
+        payload = {
+            "ok": True,
+            "renderer": renderer,
+        }
+    payload.update({
         "image_path": str(output_path) if args.layout in {"dashboard", "both"} else "",
         "html_path": str(html_path) if args.layout in {"dashboard", "both"} else "",
         "host": host,
@@ -503,7 +771,7 @@ def main() -> int:
         "panel_titles": [panel["title"] for panel in panels],
         "panel_images": panel_assets,
         "layout": args.layout,
-    }
+    })
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:

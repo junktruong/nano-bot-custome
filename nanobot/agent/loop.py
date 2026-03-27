@@ -123,11 +123,6 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
             path_append=self.exec_config.path_append,
-            ssh_target=self.exec_config.ssh_target,
-            ssh_port=self.exec_config.ssh_port,
-            ssh_identity_file=self.exec_config.ssh_identity_file,
-            ssh_options=self.exec_config.ssh_options,
-            remote_working_dir=self.exec_config.remote_working_dir or None,
         ))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
@@ -691,7 +686,6 @@ class AgentLoop:
                             "do not answer from general knowledge, ChatGPT web browsing, chat memory, or runtime "
                             "metadata. Treat ChatGPT Web like a plain tool-calling API model. "
                             "Verify the live environment now with exec/list_dir/read_file before replying. "
-                            "If exec is configured to use SSH, that is the target VPS. "
                             "Return exactly one <tool_call> JSON for the next action."
                         ),
                     })

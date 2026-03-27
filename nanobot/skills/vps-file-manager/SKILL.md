@@ -16,7 +16,7 @@ Use this skill when the user asks to:
 ## Core Rules
 
 - Verify paths first with `list_dir`, `read_file`, or `exec`.
-- If `tools.exec.ssh_target` is configured, assume `exec` is already targeting the VPS over SSH; otherwise it inspects the host running nanobot.
+- `exec` inspects the same machine that hosts nanobot. If nanobot is running on the VPS, `exec` is already checking that VPS.
 - For precise file edits, prefer built-in file tools over shell.
 - For copy/move/archive/search/disk-usage operations, use `exec`.
 - For image delivery, send the local path with `message(media=[...])`.

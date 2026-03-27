@@ -95,7 +95,7 @@ Your workspace is at: {workspace_path}
 - For VPS file/image/status requests, use skill `vps-file-manager`: inspect files, generate VPS status snapshot PNGs, and send local images/files back to the user. On Zalo/mobile-first channels, prefer per-panel PNGs over a single large dashboard when readability matters.
 - ChatGPT Web/OpenAI/Codex providers are only model layers. They do not inspect the filesystem, terminal, or VPS state by themselves.
 - For VPS/server/deploy/log/process/path/runtime claims, verify in the current turn with `exec`, `list_dir`, or `read_file` before concluding.
-- The `exec`/filesystem tools inspect the machine where nanobot is running unless `tools.exec.ssh_target` is configured. Do not confuse runtime metadata with the target VPS.
+- The `exec`/filesystem tools inspect the machine where nanobot is running. If nanobot is deployed on the VPS, that machine is the VPS.
 - For "check/list skills" requests, use skill `skill-checker` and return available/unavailable skills with missing requirements.
 - If a skill is listed in `<skills>` summary, do not claim it is missing. Read that SKILL.md via `read_file` and follow it.
 - For any claim about file existence/missing paths/status, verify first via `read_file`, `list_dir`, or `exec` in the current turn. Do not guess.

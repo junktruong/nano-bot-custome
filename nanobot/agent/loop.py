@@ -523,6 +523,22 @@ class AgentLoop:
         return None
 
     @staticmethod
+    def _has_live_tool_result_in_current_turn(messages: list[dict[str, Any]]) -> bool:
+        for msg in reversed(messages):
+            role = msg.get("role")
+            if role == "user":
+                content = msg.get("content")
+                if (
+                    isinstance(content, str)
+                    and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG)
+                ):
+                    continue
+                return False
+            if role == "tool" and msg.get("name") in {"exec", "read_file", "list_dir"}:
+                return True
+        return False
+
+    @staticmethod
     def _looks_like_tool_unavailable_reply(text: str) -> bool:
         low = (text or "").lower()
         if not low:
@@ -580,14 +596,17 @@ class AgentLoop:
         live_ops_skill_requested = bool(
             {"terminal-operator", "vps-file-manager"} & set(requested_skills or [])
         )
-        has_live_tool_result = any(
-            msg.get("role") == "tool" and msg.get("name") in {"exec", "read_file", "list_dir"}
-            for msg in initial_messages
-            if isinstance(msg, dict)
-        )
+        has_live_tool_result = self._has_live_tool_result_in_current_turn(initial_messages)
         live_system_intent = live_ops_skill_requested or self._looks_like_live_system_request(
             latest_user_text
         )
+        if live_system_intent:
+            logger.debug(
+                "Live-ops intent detected: requested_skills={} has_current_turn_tool_result={} latest_user_text={}",
+                requested_skills or [],
+                has_live_tool_result,
+                latest_user_text[:160],
+            )
 
         while iteration < self.max_iterations:
             iteration += 1

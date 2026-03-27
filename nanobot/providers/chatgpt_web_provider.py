@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import json
@@ -717,6 +718,7 @@ class ChatGPTWebProvider(LLMProvider):
             "For file/path/status checks, verify with tools first (read_file/list_dir/exec) before concluding.",
             "For VPS/server/deploy/process/log/terminal/path requests, do not rely on chatgpt.com memory, browsing, or generic knowledge.",
             "Use `exec`/`list_dir`/`read_file` to inspect the live environment before answering those requests.",
+            "Do not reply with raw shell commands or pseudo-calls like `exec(command=...)` when a listed tool can be called directly.",
             "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
             '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',
             "Do not wrap with markdown code fences.",
@@ -798,10 +800,23 @@ class ChatGPTWebProvider(LLMProvider):
                         arguments=args,
                     )
                 )
+        pseudo_calls, cleaned_from_pseudo = self._extract_python_style_tool_calls(text, allowed)
+        if pseudo_calls:
+            existing = {
+                (call.name, json.dumps(call.arguments, sort_keys=True, ensure_ascii=False))
+                for call in calls
+            }
+            for call in pseudo_calls:
+                key = (call.name, json.dumps(call.arguments, sort_keys=True, ensure_ascii=False))
+                if key not in existing:
+                    calls.append(call)
+                    existing.add(key)
 
         clean = _TOOL_CALL_TAG_RE.sub("", text)
         clean = _TOOL_CALLS_TAG_RE.sub("", clean)
         clean = re.sub(r"<tool_calls?>\s*", "", clean, flags=re.I)
+        if cleaned_from_pseudo != text:
+            clean = self._strip_tool_markup_keep_payload(cleaned_from_pseudo)
         content_from_message_tool = ""
         filtered_calls: list[ToolCallRequest] = []
         for call in calls:
@@ -935,6 +950,170 @@ class ChatGPTWebProvider(LLMProvider):
                 continue
             out.append((name.strip(), args))
         return out
+
+    def _extract_python_style_tool_calls(
+        self,
+        text: str,
+        allowed: set[str],
+    ) -> tuple[list[ToolCallRequest], str]:
+        if not text or not allowed:
+            return [], text
+
+        spans = self._find_python_style_call_spans(text, allowed)
+        if not spans:
+            return [], text
+
+        calls: list[ToolCallRequest] = []
+        consumed: list[tuple[int, int]] = []
+        seen: set[tuple[str, str]] = set()
+        for start, end, candidate in spans:
+            parsed = self._parse_python_style_call(candidate, allowed)
+            if parsed is None:
+                continue
+            key = (parsed.name, json.dumps(parsed.arguments, sort_keys=True, ensure_ascii=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(parsed)
+            consumed.append((start, end))
+
+        if not consumed:
+            return [], text
+
+        cleaned = self._remove_spans(text, consumed)
+        return calls, cleaned
+
+    @staticmethod
+    def _find_python_style_call_spans(
+        text: str,
+        allowed: set[str],
+    ) -> list[tuple[int, int, str]]:
+        spans: list[tuple[int, int, str]] = []
+        for name in sorted(allowed, key=len, reverse=True):
+            pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*\(")
+            for match in pattern.finditer(text):
+                open_paren = text.find("(", match.start(), match.end() + 1)
+                if open_paren < 0:
+                    continue
+                close_paren = ChatGPTWebProvider._find_matching_paren(text, open_paren)
+                if close_paren is None:
+                    continue
+                candidate = text[match.start():close_paren + 1]
+                spans.append((match.start(), close_paren + 1, candidate))
+        spans.sort(key=lambda item: (item[0], item[1]))
+        deduped: list[tuple[int, int, str]] = []
+        seen_ranges: set[tuple[int, int]] = set()
+        for start, end, candidate in spans:
+            key = (start, end)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            deduped.append((start, end, candidate))
+        return deduped
+
+    @staticmethod
+    def _find_matching_paren(text: str, open_paren: int) -> int | None:
+        depth = 0
+        in_string = False
+        escaped = False
+        quote_char = ""
+        for idx in range(open_paren, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote_char:
+                    in_string = False
+                continue
+            if ch in ("'", '"'):
+                in_string = True
+                quote_char = ch
+                continue
+            if ch == "(":
+                depth += 1
+                continue
+            if ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return None
+
+    def _parse_python_style_call(
+        self,
+        candidate: str,
+        allowed: set[str],
+    ) -> ToolCallRequest | None:
+        try:
+            node = ast.parse(candidate.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return None
+
+        name = node.func.id.strip()
+        if not name or (allowed and name not in allowed):
+            return None
+
+        args_dict: dict[str, Any] = {}
+        if node.args:
+            if len(node.args) != 1 or node.keywords:
+                return None
+            try:
+                positional = ast.literal_eval(node.args[0])
+            except Exception:
+                return None
+            if isinstance(positional, dict):
+                args_dict.update(positional)
+            elif isinstance(positional, str) and name == "exec":
+                args_dict["command"] = positional
+            elif isinstance(positional, str) and name in {"read_file", "list_dir"}:
+                args_dict["path"] = positional
+            else:
+                return None
+
+        for kw in node.keywords:
+            if kw.arg is None:
+                return None
+            try:
+                value = ast.literal_eval(kw.value)
+            except Exception:
+                return None
+            args_dict[kw.arg] = value
+
+        if not isinstance(args_dict, dict):
+            return None
+        return ToolCallRequest(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            arguments=args_dict,
+        )
+
+    @staticmethod
+    def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+        if not spans:
+            return text
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if not merged or start > merged[-1][1]:
+                merged.append((start, end))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+        parts: list[str] = []
+        cursor = 0
+        for start, end in merged:
+            if cursor < start:
+                parts.append(text[cursor:start])
+            cursor = end
+        parts.append(text[cursor:])
+        cleaned = "".join(parts)
+        cleaned = re.sub(r"^[ \t>*-]+$", "", cleaned, flags=re.M)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     @staticmethod
     def _strip_tool_markup_keep_payload(text: str) -> str:

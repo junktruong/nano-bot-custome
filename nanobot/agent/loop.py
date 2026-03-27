@@ -28,7 +28,7 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, ToolCallRequest
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -485,6 +485,44 @@ class AgentLoop:
         return any(h in low for h in subject_hints) and any(h in low for h in action_hints)
 
     @staticmethod
+    def _extract_shell_command_candidate(text: str | None) -> str | None:
+        if not text:
+            return None
+
+        candidates: list[str] = []
+        for match in re.finditer(r"```(?:bash|sh|zsh|shell)?\s*([\s\S]*?)```", text, re.I):
+            block = match.group(1).strip()
+            if block:
+                candidates.append(block)
+
+        stripped = text.strip()
+        if stripped:
+            candidates.append(stripped)
+
+        command_prefixes = (
+            "python", "python3", "bash", "sh", "zsh", "ls", "pwd", "ps", "top", "htop",
+            "tail", "cat", "grep", "rg", "find", "lsof", "ss", "netstat", "tmux", "pm2",
+            "docker", "docker-compose", "systemctl", "journalctl", "du", "df", "git", "npm",
+            "node", "uv", "pip", "curl", "wget", "chmod", "chown", "cp", "mv", "rm", "mkdir",
+        )
+
+        for candidate in candidates:
+            lines = [
+                line.strip()
+                for line in candidate.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            if len(lines) != 1:
+                continue
+            line = re.sub(r"^\$\s*", "", lines[0]).strip()
+            low = line.lower()
+            if not low:
+                continue
+            if any(low.startswith(prefix + " ") or low == prefix for prefix in command_prefixes):
+                return line
+        return None
+
+    @staticmethod
     def _looks_like_tool_unavailable_reply(text: str) -> bool:
         low = (text or "").lower()
         if not low:
@@ -689,6 +727,69 @@ class AgentLoop:
                             "Return exactly one <tool_call> JSON for the next action."
                         ),
                     })
+                    continue
+
+                recovered_command = (
+                    self._extract_shell_command_candidate(clean)
+                    if live_system_intent and live_ops_force_retry_used and self.tools.has("exec")
+                    else None
+                )
+                if recovered_command:
+                    logger.warning(
+                        "Live-ops recovery: converting raw shell command reply into exec tool call: {}",
+                        recovered_command[:200],
+                    )
+                    synthetic_call = ToolCallRequest(
+                        id=f"recovered_{int(time.time() * 1000)}",
+                        name="exec",
+                        arguments={"command": recovered_command},
+                    )
+                    if self._requires_tool_approval(approval_channel, synthetic_call.name):
+                        summary = self._format_tool_approval_summary(
+                            synthetic_call.name,
+                            synthetic_call.arguments,
+                        )
+                        prompt = self._build_approval_prompt(summary)
+                        messages = self.context.add_assistant_message(messages, prompt)
+                        approval_request = {
+                            "tool_call_id": synthetic_call.id,
+                            "tool_name": synthetic_call.name,
+                            "arguments": synthetic_call.arguments,
+                            "summary": summary,
+                            "prompt": prompt,
+                        }
+                        return prompt, tools_used, messages, approval_request
+
+                    tool_call_dict = {
+                        "id": synthetic_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": synthetic_call.name,
+                            "arguments": json.dumps(synthetic_call.arguments, ensure_ascii=False),
+                        },
+                    }
+                    messages = self.context.add_assistant_message(
+                        messages,
+                        None,
+                        [tool_call_dict],
+                        reasoning_content=response.reasoning_content,
+                    )
+                    tools_used.append(synthetic_call.name)
+                    logger.info(
+                        "Recovered tool call: {}({})",
+                        synthetic_call.name,
+                        json.dumps(synthetic_call.arguments, ensure_ascii=False)[:200],
+                    )
+                    result = await self.tools.execute(
+                        synthetic_call.name,
+                        synthetic_call.arguments,
+                    )
+                    messages = self.context.add_tool_result(
+                        messages,
+                        synthetic_call.id,
+                        synthetic_call.name,
+                        result,
+                    )
                     continue
 
                 messages = self.context.add_assistant_message(

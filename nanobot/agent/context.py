@@ -91,7 +91,7 @@ Your workspace is at: {workspace_path}
 - For Google Workspace operations, prefer extension CLI-mode tasks (`*_cli`) when OAuth is configured.
 - If user does not want Google API credentials/tokens, use extension web-mode tasks (e.g. `google_docs_create_web`) and logged-in browser profile.
 - For Facebook/Messenger requests, use skill `facebook-messenger-assist`: list chats, open selected person, read latest messages, draft replies, and send only after explicit user confirmation.
-- For terminal/shell/TTY requests, use skill `terminal-operator`: prefer `exec` for short commands, switch to `tmux` only when an interactive terminal is really needed, and keep risky shell steps granular.
+- For terminal/shell/TTY requests, use skill `terminal-operator`: prefer `exec` for short commands, switch to `tmux` for interactive or real-time commands like `codex`, `htop`, `top`, `watch`, or `tail -f`, and keep risky shell steps granular.
 - For VPS file/image/status requests, use skill `vps-file-manager`: inspect files, generate VPS status snapshot PNGs, and send local images/files back to the user. On Zalo/mobile-first channels, prefer per-panel PNGs over a single large dashboard when readability matters.
 - ChatGPT Web/OpenAI/Codex providers are only model layers. They do not inspect the filesystem, terminal, or VPS state by themselves.
 - For VPS/server/deploy/log/process/path/runtime claims, verify in the current turn with `exec`, `list_dir`, or `read_file` before concluding.

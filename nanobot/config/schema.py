@@ -332,7 +332,7 @@ class ApprovalConfig(Base):
 
     enabled: bool = False
     channels: list[str] = Field(default_factory=lambda: ["zalo"])
-    tools: list[str] = Field(default_factory=lambda: ["exec", "spawn", "extension_job"])
+    tools: list[str] = Field(default_factory=lambda: ["exec", "tmux", "spawn", "extension_job"])
 
 
 class MCPServerConfig(Base):

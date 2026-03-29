@@ -66,4 +66,9 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
+    approval = tools.get("approval", {})
+    approval_tools = approval.get("tools")
+    if isinstance(approval_tools, list) and "exec" in approval_tools and "tmux" not in approval_tools:
+        approval["tools"] = [*approval_tools, "tmux"]
     return data

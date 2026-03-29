@@ -718,6 +718,7 @@ class ChatGPTWebProvider(LLMProvider):
             "For file/path/status checks, verify with tools first (read_file/list_dir/exec) before concluding.",
             "For VPS/server/deploy/process/log/terminal/path requests, do not rely on chatgpt.com memory, browsing, or generic knowledge.",
             "Use `exec`/`list_dir`/`read_file` to inspect the live environment before answering those requests.",
+            "For interactive or real-time terminal commands like codex, htop, top, watch, or tail -f, prefer the `tmux` tool instead of `exec`.",
             "Do not reply with raw shell commands or pseudo-calls like `exec(command=...)` when a listed tool can be called directly.",
             "If a tool is needed, output EXACTLY one tag with compact JSON and nothing else:",
             '<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>',

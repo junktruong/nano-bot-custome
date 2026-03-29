@@ -20,7 +20,7 @@ Use this skill when the user asks to:
 - Use short, verifiable commands first: `pwd`, `ls`, `rg`, `ps`, `df`, `du`, `tail`, `ss`, `lsof`.
 - If approval gating is enabled, keep commands granular so the user can confirm each risky step.
 - For destructive or state-changing commands, summarize the exact command before running it.
-- If the task needs a real TTY or a long-lived interactive process, also use skill `tmux`.
+- If the task needs a real TTY or a long-lived interactive process, use `tmux` instead of `exec`.
 
 ## Default Workflow
 
@@ -50,6 +50,7 @@ Use `tmux` when:
 - the process needs to stay alive after the current turn
 - you need repeated capture of terminal output over time
 - you want to monitor a deploy/build session
+- the command is interactive/realtime like `codex`, `htop`, `top`, `watch`, or `tail -f`
 
 When switching:
 - create an isolated tmux session/socket

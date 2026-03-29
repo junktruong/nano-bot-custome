@@ -25,6 +25,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.tmux import TmuxTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -124,6 +125,7 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
             path_append=self.exec_config.path_append,
         ))
+        self.tools.register(TmuxTool())
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
@@ -264,6 +266,28 @@ class AgentLoop:
             )
         ):
             _add("terminal-operator")
+        if (
+            "tmux" in available
+            and any(
+                k in text
+                for k in (
+                    "tmux",
+                    "terminal rieng",
+                    "terminal riêng",
+                    "terminal khac",
+                    "terminal khác",
+                    "realtime",
+                    "real-time",
+                    "thoi gian thuc",
+                    "thời gian thực",
+                    "htop",
+                    "codex",
+                    "watch",
+                    "tail -f",
+                )
+            )
+        ):
+            _add("tmux")
 
         return requested
 
@@ -303,6 +327,16 @@ class AgentLoop:
                 if len(detail) > 180:
                     detail = detail[:177] + "..."
                 return f"spawn background task: {detail}"
+        if tool_name == "tmux":
+            action = str(arguments.get("action", "")).strip()
+            session = str(arguments.get("session_name", "")).strip()
+            command = str(arguments.get("command", "")).strip()
+            detail = session or command or action
+            if detail:
+                detail = re.sub(r"\s+", " ", detail)
+                if len(detail) > 180:
+                    detail = detail[:177] + "..."
+                return f"run tmux action `{action or 'run'}`: {detail}"
         if tool_name == "extension_job":
             task = str(arguments.get("task", "") or arguments.get("kind", "")).strip()
             if task:
@@ -523,6 +557,46 @@ class AgentLoop:
         return None
 
     @staticmethod
+    def _looks_like_interactive_terminal_request(text: str) -> bool:
+        low = (text or "").lower()
+        if not low:
+            return False
+        hints = (
+            "terminal riêng",
+            "terminal rieng",
+            "terminal khác",
+            "terminal khac",
+            "real-time",
+            "realtime",
+            "thời gian thực",
+            "thoi gian thuc",
+            "interactive",
+            "tty",
+            "codex",
+            "htop",
+            "top",
+            "watch",
+            "tail -f",
+        )
+        return any(h in low for h in hints)
+
+    @staticmethod
+    def _command_needs_tmux(command: str | None) -> bool:
+        low = (command or "").strip().lower()
+        if not low:
+            return False
+        return any(
+            low == prefix or low.startswith(prefix + " ")
+            for prefix in ("codex", "htop", "top", "watch", "btop", "tail -f", "less", "more", "vim", "nvim", "nano")
+        )
+
+    @staticmethod
+    def _suggest_tmux_session_name(command: str | None) -> str:
+        base = (command or "").strip().split(None, 1)[0] if (command or "").strip() else "terminal"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-.").lower()
+        return safe[:48] or "terminal"
+
+    @staticmethod
     def _has_live_tool_result_in_current_turn(messages: list[dict[str, Any]]) -> bool:
         for msg in reversed(messages):
             role = msg.get("role")
@@ -593,8 +667,9 @@ class AgentLoop:
         latest_user_text = self._latest_user_text(initial_messages)
         reminder_intent = self._looks_like_reminder_request(latest_user_text)
         messenger_intent = self._looks_like_messenger_request(latest_user_text)
+        interactive_terminal_intent = self._looks_like_interactive_terminal_request(latest_user_text)
         live_ops_skill_requested = bool(
-            {"terminal-operator", "vps-file-manager"} & set(requested_skills or [])
+            {"terminal-operator", "vps-file-manager", "tmux"} & set(requested_skills or [])
         )
         has_live_tool_result = self._has_live_tool_result_in_current_turn(initial_messages)
         live_system_intent = live_ops_skill_requested or self._looks_like_live_system_request(
@@ -627,6 +702,35 @@ class AgentLoop:
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 for idx, tool_call in enumerate(response.tool_calls):
+                    if (
+                        tool_call.name == "exec"
+                        and self.tools.has("tmux")
+                        and (
+                            interactive_terminal_intent
+                            or self._command_needs_tmux(
+                                str((tool_call.arguments or {}).get("command", "") or "")
+                            )
+                        )
+                    ):
+                        command = str((tool_call.arguments or {}).get("command", "") or "").strip()
+                        working_dir = str((tool_call.arguments or {}).get("working_dir", "") or "").strip()
+                        session_name = self._suggest_tmux_session_name(command)
+                        logger.info(
+                            "Routing exec to tmux for interactive command: session={} command={}",
+                            session_name,
+                            command[:200],
+                        )
+                        tool_call = ToolCallRequest(
+                            id=tool_call.id,
+                            name="tmux",
+                            arguments={
+                                "action": "run",
+                                "command": command,
+                                "session_name": session_name,
+                                **({"working_dir": working_dir} if working_dir else {}),
+                            },
+                        )
+
                     if self._requires_tool_approval(approval_channel, tool_call.name):
                         summary = self._format_tool_approval_summary(tool_call.name, tool_call.arguments)
                         prompt = self._build_approval_prompt(summary)
@@ -754,14 +858,26 @@ class AgentLoop:
                     else None
                 )
                 if recovered_command:
+                    use_tmux = self.tools.has("tmux") and (
+                        interactive_terminal_intent or self._command_needs_tmux(recovered_command)
+                    )
                     logger.warning(
-                        "Live-ops recovery: converting raw shell command reply into exec tool call: {}",
+                        "Live-ops recovery: converting raw shell command reply into {} tool call: {}",
+                        "tmux" if use_tmux else "exec",
                         recovered_command[:200],
                     )
                     synthetic_call = ToolCallRequest(
                         id=f"recovered_{int(time.time() * 1000)}",
-                        name="exec",
-                        arguments={"command": recovered_command},
+                        name="tmux" if use_tmux else "exec",
+                        arguments=(
+                            {
+                                "action": "run",
+                                "command": recovered_command,
+                                "session_name": self._suggest_tmux_session_name(recovered_command),
+                            }
+                            if use_tmux
+                            else {"command": recovered_command}
+                        ),
                     )
                     if self._requires_tool_approval(approval_channel, synthetic_call.name):
                         summary = self._format_tool_approval_summary(
